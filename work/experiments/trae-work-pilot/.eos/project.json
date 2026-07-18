@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "projectId": "project.trae_work_eos_u63a5u5165u8bd5u9a8c",
+  "workspace": "/Users/sanzhaibanniang/Documents/Codex/2026-07-16/gemini-3-1-pro/work/experiments/trae-work-pilot",
+  "vaultDir": "/Users/sanzhaibanniang/Documents/Codex/2026-07-16/gemini-3-1-pro/work/experiments/trae-work-pilot/.eos/vault",
+  "createdAt": "2026-07-18T17:51:45.229Z",
+  "capture": {
+    "defaultConsent": false,
+    "storage": "local"
+  }
+}

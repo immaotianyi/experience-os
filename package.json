@@ -1,0 +1,31 @@
+{
+  "name": "experience-os-prototype",
+  "version": "2.0.0-a",
+  "private": true,
+  "type": "module",
+  "description": "Experience OS 0.1 prototype: automatic experience assetization through projects, schemas, state machine, vaults, and wall-hit feedback.",
+  "scripts": {
+    "demo": "node src/demo.js",
+    "validate": "node src/demo.js --validate-only",
+    "reuse": "node src/reuseDemo.js",
+    "self-iterate": "node src/selfIterateDemo.js",
+    "self-iterate:failure": "node src/selfIterateFailureDemo.js",
+    "human-review": "node src/humanReviewDemo.js",
+    "validate-vault": "node src/validateVaultDemo.js",
+    "archive-vault": "node src/archiveVaultDemo.js",
+    "maintain": "node src/maintainDemo.js",
+    "web": "node src/webServer.js",
+    "relay:mcp": "node src/eosRelayMcp.js",
+    "bootstrap": "node src/eosBootstrap.js",
+    "test": "node --test tests/*.test.js",
+    "test:domain": "node --test tests/domain.test.js",
+    "test:validate": "node --test tests/validate.test.js",
+    "test:vault": "node --test tests/vault.test.js",
+    "test:pipeline": "node --test tests/pipeline.test.js",
+    "test:utils": "node --test tests/utils.test.js",
+    "verify": "npm run demo && npm run validate && npm run reuse && npm run self-iterate && npm run self-iterate:failure && npm run human-review && npm run validate-vault && npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

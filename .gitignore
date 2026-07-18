@@ -1,0 +1,7 @@
+node_modules/
+work/vaults/
+work/fixtures/
+work/vault-archive/
+.env
+*.log
+.DS_Store
