@@ -177,3 +177,30 @@ export function IconDownload(props) {
     </svg>
   );
 }
+
+export function IconProject(props) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M6 3h9l4 4v14H6V3z" />
+      <path d="M15 3v4h4" />
+      <line x1="9" y1="12" x2="16" y2="12" />
+      <line x1="9" y1="16" x2="14" y2="16" />
+    </svg>
+  );
+}
+
+export function IconCheck(props) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M4 12.5l5 5L20 6.5" />
+    </svg>
+  );
+}
+
+export function IconChevronDown(props) {
+  return (
+    <svg {...base} {...props}>
+      <path d="M5 9l7 7 7-7" />
+    </svg>
+  );
+}

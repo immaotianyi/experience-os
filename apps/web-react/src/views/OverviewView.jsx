@@ -93,7 +93,7 @@ export default function OverviewView({ refreshKey }) {
           <div style={{ marginTop: "12px", display: "flex", flexDirection: "column", gap: "4px" }}>
             {latest.project && <span className="tag">最新项目: {latest.project.name || latest.project.id}</span>}
             {latest.skillRun && <span className="tag accent">最近 Skill 运行: {latest.skillRun.summary || latest.skillRun.id.slice(0, 30)}</span>}
-            {latest.wallHit && <span className="tag" style={{ background: "var(--bad-bg)", color: "var(--bad)" }}>最近撞墙: {latest.wallHit.message?.slice(0, 40) || latest.wallHit.id.slice(0, 30)}</span>}
+            {latest.wallHit && <span className="tag bad">最近撞墙: {latest.wallHit.message?.slice(0, 40) || latest.wallHit.id.slice(0, 30)}</span>}
           </div>
           <p className="muted" style={{ margin: "8px 0 0", fontSize: "12px" }}>
             审查队列: {reviewQueue.pendingReviewCount ?? 0} 待审 · 最近包 {reviewQueue.latestReviewPacketCount ?? 0} 条

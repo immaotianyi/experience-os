@@ -13,11 +13,19 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile, readFile, access } from "node:fs/promises";
+import { mkdir, writeFile, readFile, access, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { Vault } from "./vault.js";
 
 const GIT_BIN = "git";
+const WRITE_LOCK_NAME = ".eos-write-lock";
+const LOCK_WAIT_MS = 25;
+const LOCK_TIMEOUT_MS = 15_000;
+const STALE_LOCK_MS = 120_000;
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function git(args, cwd) {
   try {
@@ -50,58 +58,111 @@ export class GitVault {
     this.rootDir = rootDir;
     this.vault = new Vault(rootDir);
     this.gitEnabled = false;
+    this.writeLockDepth = 0;
   }
 
   async init() {
-    await this.vault.init();
+    return this.withWriteLock(async () => {
+      await this.vault.init();
 
-    if (!gitAvailable()) {
-      console.warn("[GitVault] git not found — running in no-version-control mode");
-      return;
+      if (!gitAvailable()) {
+        console.warn("[GitVault] git not found — running in no-version-control mode");
+        return;
+      }
+
+      const gitDir = path.join(this.rootDir, ".git");
+      try {
+        await access(gitDir);
+        this.gitEnabled = true;
+      } catch {
+        // .git doesn't exist — initialize
+        git(["init"], this.rootDir);
+
+        // Write .gitignore
+        const gitignorePath = path.join(this.rootDir, ".gitignore");
+        await writeFile(
+          gitignorePath,
+          ["# Vault archive — not version controlled", "vault-archive/", "", "# OS files", ".DS_Store", "*.tmp", "*.log", `${WRITE_LOCK_NAME}/`, ""].join("\n"),
+          "utf8"
+        );
+
+        // Set default git identity if not configured
+        try {
+          git(["config", "user.name"], this.rootDir);
+        } catch {
+          git(["config", "user.name", "Experience OS"], this.rootDir);
+        }
+        try {
+          git(["config", "user.email"], this.rootDir);
+        } catch {
+          git(["config", "user.email", "system@experience-os.local"], this.rootDir);
+        }
+
+        // Initial commit
+        git(["add", "-A"], this.rootDir);
+        try {
+          git(["commit", "-m", "Vault initialized"], this.rootDir);
+        } catch {
+          // Nothing to commit — empty vault
+        }
+
+        this.gitEnabled = true;
+        console.log("[GitVault] Git repository initialized at", this.rootDir);
+      }
+    });
+  }
+
+  async withWriteLock(work, { timeoutMs = LOCK_TIMEOUT_MS } = {}) {
+    if (typeof work !== "function") throw new Error("withWriteLock requires a function");
+    if (this.writeLockDepth > 0) {
+      this.writeLockDepth += 1;
+      try {
+        return await work();
+      } finally {
+        this.writeLockDepth -= 1;
+      }
     }
 
-    const gitDir = path.join(this.rootDir, ".git");
+    await mkdir(this.rootDir, { recursive: true });
+    const lockDir = path.join(this.rootDir, WRITE_LOCK_NAME);
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      try {
+        await mkdir(lockDir);
+        break;
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+        try {
+          const lockStats = await stat(lockDir);
+          if (Date.now() - lockStats.mtimeMs > STALE_LOCK_MS) {
+            await rm(lockDir, { recursive: true, force: true });
+            continue;
+          }
+        } catch (statError) {
+          if (statError.code !== "ENOENT") throw statError;
+          continue;
+        }
+        if (Date.now() >= deadline) {
+          throw new Error(`Vault is busy: another writer holds ${WRITE_LOCK_NAME}`);
+        }
+        await delay(LOCK_WAIT_MS);
+      }
+    }
+
+    this.writeLockDepth = 1;
     try {
-      await access(gitDir);
-      this.gitEnabled = true;
-    } catch {
-      // .git doesn't exist — initialize
-      git(["init"], this.rootDir);
-
-      // Write .gitignore
-      const gitignorePath = path.join(this.rootDir, ".gitignore");
-      await writeFile(
-        gitignorePath,
-        ["# Vault archive — not version controlled", "vault-archive/", "", "# OS files", ".DS_Store", "*.tmp", "*.log", ""].join("\n"),
-        "utf8"
-      );
-
-      // Set default git identity if not configured
-      try {
-        git(["config", "user.name"], this.rootDir);
-      } catch {
-        git(["config", "user.name", "Experience OS"], this.rootDir);
-      }
-      try {
-        git(["config", "user.email"], this.rootDir);
-      } catch {
-        git(["config", "user.email", "system@experience-os.local"], this.rootDir);
-      }
-
-      // Initial commit
-      git(["add", "-A"], this.rootDir);
-      try {
-        git(["commit", "-m", "Vault initialized"], this.rootDir);
-      } catch {
-        // Nothing to commit — empty vault
-      }
-
-      this.gitEnabled = true;
-      console.log("[GitVault] Git repository initialized at", this.rootDir);
+      return await work();
+    } finally {
+      this.writeLockDepth = 0;
+      await rm(lockDir, { recursive: true, force: true });
     }
   }
 
   async save(record) {
+    return this.withWriteLock(() => this.saveUnlocked(record));
+  }
+
+  async saveUnlocked(record) {
     const filePath = await this.vault.save(record);
 
     if (this.gitEnabled) {
@@ -195,24 +256,26 @@ export class GitVault {
    * Creates a new commit that restores the old content.
    */
   async revert(recordId, commitHash) {
-    if (!this.gitEnabled) {
-      throw new Error("Git is not enabled — cannot revert");
-    }
+    return this.withWriteLock(async () => {
+      if (!this.gitEnabled) {
+        throw new Error("Git is not enabled — cannot revert");
+      }
 
-    const oldRecord = await this.loadAtCommit(recordId, commitHash);
-    if (!oldRecord) {
-      throw new Error(`Record ${recordId} not found at commit ${commitHash}`);
-    }
+      const oldRecord = await this.loadAtCommit(recordId, commitHash);
+      if (!oldRecord) {
+        throw new Error(`Record ${recordId} not found at commit ${commitHash}`);
+      }
 
-    // Save the old content back through vault (triggers auto-commit)
-    await this.vault.save(oldRecord);
+      // Save the old content back through vault, then create one explicit revert commit.
+      await this.vault.save(oldRecord);
 
-    const dir = this.findCollectionDir(recordId);
-    const relPath = path.relative(this.rootDir, path.join(this.rootDir, dir, `${recordId}.json`));
-    git(["add", relPath], this.rootDir);
-    git(["commit", "--no-gpg-sign", "-m", `[${oldRecord.kind}] revert: ${recordId} -> ${commitHash.slice(0, 8)}`], this.rootDir);
+      const dir = this.findCollectionDir(recordId);
+      const relPath = path.relative(this.rootDir, path.join(this.rootDir, dir, `${recordId}.json`));
+      git(["add", relPath], this.rootDir);
+      git(["commit", "--no-gpg-sign", "-m", `[${oldRecord.kind}] revert: ${recordId} -> ${commitHash.slice(0, 8)}`], this.rootDir);
 
-    return oldRecord;
+      return oldRecord;
+    });
   }
 
   /**
@@ -250,15 +313,17 @@ export class GitVault {
     return { enabled: true, totalCommits, lastCommit, dirty };
   }
 
-  commitAll(message) {
-    if (!this.gitEnabled) return false;
-    try {
-      git(["add", "-A"], this.rootDir);
-      git(["commit", "--no-gpg-sign", "-m", message], this.rootDir);
-      return true;
-    } catch {
-      return false;
-    }
+  async commitAll(message) {
+    return this.withWriteLock(async () => {
+      if (!this.gitEnabled) return false;
+      try {
+        git(["add", "-A"], this.rootDir);
+        git(["commit", "--no-gpg-sign", "-m", message], this.rootDir);
+        return true;
+      } catch {
+        return false;
+      }
+    });
   }
 
   findCollectionDir(recordId) {

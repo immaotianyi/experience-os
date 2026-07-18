@@ -24,9 +24,9 @@ import { Vault } from "../src/vault.js";
 import { GitVault } from "../src/gitVault.js";
 import { generateLicenseKey, verifyLicenseKey, calculateCommission } from "../src/pricingEngine.js";
 import { createSkillCandidate, createReviewPacket, createMarketplaceListing, createTransaction, createSkillRating } from "../src/domain.js";
-import { publishSkill, searchMarketplace } from "../src/marketplace.js";
-import { submitRating, getRatingSummary } from "../src/qualityRating.js";
-import { processPurchase, processTrial, refundTransaction, verifyBuyerLicense } from "../src/transactionLog.js";
+import { publishSkill, searchMarketplace, unpublishSkill, suspendListing, recordDownload, getListingDetails, listPublishedVersions } from "../src/marketplace.js";
+import { submitRating, getRatingSummary, getSkillQualityReport, getQualityLeaderboard } from "../src/qualityRating.js";
+import { processPurchase, processTrial, refundTransaction, verifyBuyerLicense, getTransactionHistory, getRevenueSummary } from "../src/transactionLog.js";
 import { submitVote, assignReviewers, VOTE_TYPES } from "../src/teamReviewEngine.js";
 import { validateRecord } from "../src/validate.js";
 import { filterReadable, canRead, canEdit, contextFromRequest, applyOwnership, ROLES, VISIBILITY } from "../src/accessControl.js";
@@ -644,5 +644,169 @@ describe("accessControl zero-intrusion mode", () => {
     const annotated = applyOwnership(record, { userId: "alice" });
     assert.equal(annotated.ownerId, "bob");
     assert.equal(annotated.visibility, "public");
+  });
+});
+
+// ============================================================
+// 12. subscription duplicate purchase prevention
+// ============================================================
+describe("subscription duplicate purchase prevention", () => {
+  it("rejects duplicate subscription by same buyer", async () => {
+    const skill = createSkillCandidate({
+      id: `skill.sub_dup.${Date.now()}`,
+      projectId: "project.sub",
+      name: "Sub Dup Test",
+      origin: "test",
+      trigger: { intent: "test", signals: ["sig"] },
+      inputSchema: {},
+      outputSchema: {},
+      safetyLevel: "safe",
+      fallback: "none"
+    });
+    skill.status = "stable";
+    await gitVault.save(skill);
+
+    const listing = await publishSkill(gitVault, {
+      skillId: skill.id,
+      sellerId: "seller.sub",
+      pricing: { model: "subscription", price: 0, currency: "CNY", subscriptionPrice: 9.9 },
+      license: "Commercial"
+    });
+
+    const r1 = await processPurchase(gitVault, {
+      listingId: listing.id,
+      buyerId: "buyer.sub",
+      purchaseType: "subscription"
+    });
+    assert.ok(r1.transaction);
+
+    await assert.rejects(
+      () => processPurchase(gitVault, {
+        listingId: listing.id,
+        buyerId: "buyer.sub",
+        purchaseType: "subscription"
+      }),
+      /already holds a license/i
+    );
+  });
+});
+
+// ============================================================
+// 13. marketplace input validation
+// ============================================================
+describe("marketplace input validation", () => {
+  it("rejects missing skillId in publishSkill", async () => {
+    await assert.rejects(
+      () => publishSkill(gitVault, { pricing: { model: "free", price: 0 }, license: "MIT" }),
+      /skillId is required/
+    );
+  });
+
+  it("rejects missing listingId in unpublishSkill", async () => {
+    await assert.rejects(
+      () => unpublishSkill(gitVault, ""),
+      /listingId is required/
+    );
+  });
+
+  it("rejects missing listingId in suspendListing", async () => {
+    await assert.rejects(
+      () => suspendListing(gitVault, null),
+      /listingId is required/
+    );
+  });
+
+  it("rejects missing listingId in recordDownload", async () => {
+    await assert.rejects(
+      () => recordDownload(gitVault, undefined),
+      /listingId is required/
+    );
+  });
+
+  it("rejects missing listingId in getListingDetails", async () => {
+    await assert.rejects(
+      () => getListingDetails(gitVault, ""),
+      /listingId is required/
+    );
+  });
+
+  it("rejects missing skillId in listPublishedVersions", async () => {
+    await assert.rejects(
+      () => listPublishedVersions(gitVault, ""),
+      /skillId is required/
+    );
+  });
+});
+
+// ============================================================
+// 14. transactionLog input validation
+// ============================================================
+describe("transactionLog input validation", () => {
+  it("rejects missing sellerId in getRevenueSummary", async () => {
+    await assert.rejects(
+      () => getRevenueSummary(gitVault, ""),
+      /sellerId is required/
+    );
+  });
+
+  it("rejects missing listingId in verifyBuyerLicense", async () => {
+    await assert.rejects(
+      () => verifyBuyerLicense(gitVault, "", "buyer"),
+      /listingId is required/
+    );
+  });
+
+  it("rejects missing buyerId in verifyBuyerLicense", async () => {
+    await assert.rejects(
+      () => verifyBuyerLicense(gitVault, "listing.x", ""),
+      /buyerId is required/
+    );
+  });
+});
+
+// ============================================================
+// 15. qualityRating input validation
+// ============================================================
+describe("qualityRating input validation", () => {
+  it("rejects missing skillId in getRatingSummary", async () => {
+    await assert.rejects(
+      () => getRatingSummary(gitVault, ""),
+      /skillId is required/
+    );
+  });
+
+  it("rejects missing skillId in getSkillQualityReport", async () => {
+    await assert.rejects(
+      () => getSkillQualityReport(gitVault, ""),
+      /skillId is required/
+    );
+  });
+});
+
+// ============================================================
+// 16. limit clamping
+// ============================================================
+describe("limit clamping", () => {
+  it("clamps searchMarketplace limit to max 500", async () => {
+    const results = await searchMarketplace(gitVault, { limit: 99999 });
+    assert.ok(Array.isArray(results));
+    assert.ok(results.length <= 500);
+  });
+
+  it("clamps searchMarketplace limit to min 1", async () => {
+    const results = await searchMarketplace(gitVault, { limit: -5 });
+    assert.ok(Array.isArray(results));
+  });
+
+  it("clamps getTransactionHistory limit to max 500", async () => {
+    const results = await getTransactionHistory(gitVault, { limit: 99999 });
+    assert.ok(Array.isArray(results));
+    assert.ok(results.length <= 500);
+  });
+
+  it("clamps getQualityLeaderboard limit to max 500", async () => {
+    const results = await getQualityLeaderboard(gitVault, 99999);
+    assert.ok(Array.isArray(results));
+    assert.ok(results.length <= 500);
   });
 });

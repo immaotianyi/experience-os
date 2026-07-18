@@ -309,6 +309,31 @@ describe("captureWorkCheckpoint", () => {
     assert.equal(timeline.counts.checkpoints, 1);
     assert.ok(timeline.timeline.some((item) => item.kind === "WorkCheckpoint"));
   });
+
+  it("serializes concurrent checkpoints so project evidence links are not lost", async () => {
+    await vault.init();
+    await startProject(vault, { id: "project.checkpoint.parallel", name: "x", goal: "g" });
+    const otherWriter = new GitVault(tmpDir);
+    await otherWriter.init();
+
+    await Promise.all([
+      captureWorkCheckpoint(vault, {
+        id: "checkpoint.parallel.a", eventId: "event.parallel.a", evidenceId: "evidence.parallel.a",
+        projectId: "project.checkpoint.parallel", title: "First capture", content: "First consented fragment.",
+        sourceTool: "trae", consented: true
+      }),
+      captureWorkCheckpoint(otherWriter, {
+        id: "checkpoint.parallel.b", eventId: "event.parallel.b", evidenceId: "evidence.parallel.b",
+        projectId: "project.checkpoint.parallel", title: "Second capture", content: "Second consented fragment.",
+        sourceTool: "trae", consented: true
+      })
+    ]);
+
+    const project = await getProject(vault, "project.checkpoint.parallel");
+    assert.deepEqual([...project.evidenceLinkIds].sort(), ["evidence.parallel.a", "evidence.parallel.b"]);
+    const timeline = await buildProjectTimeline(vault, "project.checkpoint.parallel");
+    assert.equal(timeline.counts.checkpoints, 2);
+  });
 });
 
 describe("Experience Receipt drafts", () => {

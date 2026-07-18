@@ -14,8 +14,9 @@ import {
   captureWorkCheckpoint,
   fetchReadiness,
   promoteExperienceAsset,
-  fetchExperienceAssets
-  , fetchReuseSuggestions, recordReuseFeedback
+  fetchExperienceAssets,
+  fetchReuseSuggestions,
+  recordReuseFeedback
 } from "../api/projects.js";
 
 const MODES = ["explore", "advise", "draft", "execute", "commit"];

@@ -178,4 +178,19 @@ describe("GitVault", () => {
     const results = await v.search({ query: "Auto", limit: 5 });
     assert.ok(results.some((r) => r.record.id === "project.git_test_auto"));
   });
+
+  it("serializes parallel writes from separate GitVault instances", async () => {
+    const first = new GitVault(tempDir);
+    const second = new GitVault(tempDir);
+    await first.init();
+    await second.init();
+
+    const left = createProject({ id: "project.parallel_left", name: "Left", goal: "g" });
+    const right = createProject({ id: "project.parallel_right", name: "Right", goal: "g" });
+    await Promise.all([first.save(left), second.save(right)]);
+
+    assert.equal((await first.load("Project", left.id)).name, "Left");
+    assert.equal((await second.load("Project", right.id)).name, "Right");
+    assert.equal(first.stats().dirty, false);
+  });
 });

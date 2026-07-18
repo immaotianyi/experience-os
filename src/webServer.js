@@ -12,7 +12,7 @@ import { exportSkillAsMcpServer, exportAllStableSkills } from "./mcpExporter.js"
 import { buildLocalIndex, searchIndex, importSkill, getSkillMetadata, listCategories } from "./skillRegistry.js";
 import { assignReviewers, submitVote, addDiscussionComment, checkConfirmationStatus, finalizeTeamReview, getReviewSummary } from "./teamReviewEngine.js";
 import { applyOwnership, canRead, canEdit, filterReadable, contextFromRequest } from "./accessControl.js";
-import { publishSkill, unpublishSkill, suspendListing, searchMarketplace, getListingDetails, listPublishedVersions, recordDownload, syncListingRatings, getMarketplaceStats } from "./marketplace.js";
+import { publishSkill, unpublishSkill, suspendListing, searchMarketplace, getListingDetails, listPublishedVersions, recordDownload, getMarketplaceStats } from "./marketplace.js";
 import { submitRating, getRatingSummary, getSkillQualityReport, autoFlagLowQuality, getQualityLeaderboard } from "./qualityRating.js";
 import { validatePricing, calculateCommission, checkTrial, computePurchaseBreakdown, verifyLicenseKey } from "./pricingEngine.js";
 import { processPurchase, processTrial, refundTransaction, getTransactionHistory, getRevenueSummary, verifyBuyerLicense, getTransaction } from "./transactionLog.js";
@@ -278,7 +278,8 @@ async function handleApi(request, url, response) {
       const timeline = await buildProjectTimeline(vault, projectId);
       sendJson(response, timeline);
     } catch (err) {
-      sendJson(response, { error: err.message }, 404);
+      const status = String(err.message).includes("not found") ? 404 : 400;
+      sendJson(response, { error: err.message }, status);
     }
     return;
   }
@@ -289,7 +290,8 @@ async function handleApi(request, url, response) {
     try {
       sendJson(response, await getProjectReadiness(vault, projectId));
     } catch (err) {
-      sendJson(response, { error: err.message }, 404);
+      const status = String(err.message).includes("not found") ? 404 : 400;
+      sendJson(response, { error: err.message }, status);
     }
     return;
   }
@@ -298,7 +300,10 @@ async function handleApi(request, url, response) {
     const projectId = url.searchParams.get("projectId");
     if (!projectId) { sendJson(response, { error: "projectId is required" }, 400); return; }
     try { sendJson(response, { records: await getVerifiedExperienceSuggestions(vault, projectId, url.searchParams.get("q") || "") }); }
-    catch (err) { sendJson(response, { error: err.message }, 404); }
+    catch (err) {
+      const status = String(err.message).includes("not found") ? 404 : 400;
+      sendJson(response, { error: err.message }, status);
+    }
     return;
   }
   if (url.pathname === "/api/reuse-feedback" && request.method === "POST") {
@@ -790,8 +795,9 @@ async function handleApi(request, url, response) {
   if (url.pathname === "/api/quality/rate" && request.method === "POST") {
     const body = await readJsonBody(request);
     try {
+      // submitRating already calls syncListingRatings internally,
+      // so no need to call it again here.
       const rating = await submitRating(vault, body);
-      await syncListingRatings(vault, body.skillId);
       sendJson(response, { ok: true, rating });
     } catch (error) {
       sendJson(response, { error: error.message }, 400);

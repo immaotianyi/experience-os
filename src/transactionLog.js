@@ -10,7 +10,7 @@
  *                  → generateLicenseKey → createTransaction → update listing
  */
 
-import { createTransaction } from "./domain.js";
+import { createTransaction, TRANSACTION_TYPES } from "./domain.js";
 import {
   calculateCommission,
   resolvePrice,
@@ -38,82 +38,95 @@ export async function processPurchase(vault, { listingId, buyerId, purchaseType 
   if (!buyerId || typeof buyerId !== "string") {
     throw new Error("buyerId is required");
   }
-
-  const listing = await vault.load("MarketplaceListing", listingId).catch(() => null);
-  if (!listing) {
-    throw new Error(`Listing not found: ${listingId}`);
+  if (!TRANSACTION_TYPES.includes(purchaseType)) {
+    throw new Error(`purchaseType must be one of: ${TRANSACTION_TYPES.join(", ")}`);
   }
 
-  const blockers = checkPurchasable(listing);
-  if (blockers.length > 0) {
-    throw new Error(`Listing not purchasable: ${blockers.join("; ")}`);
-  }
+  // All check-then-act logic inside the write lock to prevent TOCTOU race conditions
+  const doPurchase = async () => {
+    const listing = await vault.load("MarketplaceListing", listingId).catch(() => null);
+    if (!listing) {
+      throw new Error(`Listing not found: ${listingId}`);
+    }
 
-  // Trial path — check eligibility
-  if (purchaseType === "trial") {
-    if (!listing.trialEnabled) {
-      throw new Error("Trial not enabled for this listing");
+    const blockers = checkPurchasable(listing);
+    if (blockers.length > 0) {
+      throw new Error(`Listing not purchasable: ${blockers.join("; ")}`);
     }
-    const trialStatus = await checkTrial(vault, listingId, buyerId);
-    if (!trialStatus.eligible) {
-      throw new Error(`Trial limit reached (${trialStatus.used}/${trialStatus.limit})`);
-    }
-  } else {
-    // For one_time purchases, check if buyer already holds a license (prevent double charge)
-    if (listing.pricing?.model === "one_time") {
-      const existingLicense = await verifyBuyerLicense(vault, listingId, buyerId);
-      if (existingLicense.hasLicense) {
-        throw new Error(`Buyer ${buyerId} already holds a license for this listing. Use the existing license key: ${existingLicense.licenseKey}`);
+
+    // Trial path — check eligibility
+    if (purchaseType === "trial") {
+      if (!listing.trialEnabled) {
+        throw new Error("Trial not enabled for this listing");
+      }
+      const trialStatus = await checkTrial(vault, listingId, buyerId);
+      if (!trialStatus.eligible) {
+        throw new Error(`Trial limit reached (${trialStatus.used}/${trialStatus.limit})`);
+      }
+    } else {
+      // For one_time and subscription models, check if buyer already holds a
+      // license (prevent double charge). Free listings don't need this check
+      // since they cost 0, but we still prevent duplicate license issuance.
+      if (listing.pricing?.model === "one_time" || listing.pricing?.model === "subscription") {
+        const existingLicense = await verifyBuyerLicense(vault, listingId, buyerId);
+        if (existingLicense.hasLicense) {
+          throw new Error(`Buyer ${buyerId} already holds a license for this listing. Use the existing license key: ${existingLicense.licenseKey}`);
+        }
       }
     }
-  }
 
-  const amount = resolvePrice(listing, purchaseType);
-  const split = calculateCommission(amount);
-  const licenseKey = generateLicenseKey({
-    licenseType: listing.license,
-    listingId,
-    buyerId
-  });
+    const amount = resolvePrice(listing, purchaseType);
+    const split = calculateCommission(amount);
+    const licenseKey = generateLicenseKey({
+      licenseType: listing.license,
+      listingId,
+      buyerId
+    });
 
-  const id = `transaction.${slug(listingId)}.${slug(buyerId)}.${Date.now()}`;
-  const transaction = createTransaction({
-    id,
-    projectId: listing.projectId,
-    listingId,
-    skillId: listing.skillId,
-    buyerId,
-    sellerId: listing.sellerId,
-    type: purchaseType,
-    amount: split.amount,
-    commission: split.commission,
-    netToSeller: split.netToSeller,
-    licenseKey,
-    licenseType: listing.license,
-    status: "completed"
-  });
+    const id = `transaction.${slug(listingId)}.${slug(buyerId)}.${Date.now()}`;
+    const transaction = createTransaction({
+      id,
+      projectId: listing.projectId,
+      listingId,
+      skillId: listing.skillId,
+      buyerId,
+      sellerId: listing.sellerId,
+      type: purchaseType,
+      amount: split.amount,
+      commission: split.commission,
+      netToSeller: split.netToSeller,
+      licenseKey,
+      licenseType: listing.license,
+      status: "completed"
+    });
 
-  await vault.save(transaction);
+    await vault.save(transaction);
 
-  // Update listing revenue + downloads
-  if (purchaseType !== "trial") {
-    listing.revenue = Math.round(((listing.revenue || 0) + split.amount) * 100) / 100;
-  }
-  listing.downloads = (listing.downloads || 0) + 1;
-  listing.updatedAt = new Date().toISOString();
-  await vault.save(listing);
-
-  return {
-    transaction,
-    listing,
-    licenseKey,
-    breakdown: {
-      gross: split.amount,
-      platformCommission: split.commission,
-      authorNet: split.netToSeller,
-      type: purchaseType
+    // Update listing revenue + downloads
+    if (purchaseType !== "trial") {
+      listing.revenue = Math.round(((listing.revenue || 0) + split.amount) * 100) / 100;
     }
+    listing.downloads = (listing.downloads || 0) + 1;
+    listing.updatedAt = new Date().toISOString();
+    await vault.save(listing);
+
+    return {
+      transaction,
+      listing,
+      licenseKey,
+      breakdown: {
+        gross: split.amount,
+        platformCommission: split.commission,
+        authorNet: split.netToSeller,
+        type: purchaseType
+      }
+    };
   };
+
+  if (typeof vault.withWriteLock === "function") {
+    return vault.withWriteLock(doPurchase);
+  }
+  return doPurchase();
 }
 
 /**
@@ -132,34 +145,46 @@ export async function processTrial(vault, { listingId, buyerId }) {
  * @returns {Promise<Object>} updated transaction
  */
 export async function refundTransaction(vault, transactionId) {
-  const transaction = await vault.load("Transaction", transactionId).catch(() => null);
-  if (!transaction) {
-    throw new Error(`Transaction not found: ${transactionId}`);
-  }
-  if (transaction.status === "refunded") {
-    throw new Error("Transaction already refunded");
-  }
-  if (transaction.type === "trial") {
-    throw new Error("Trial transactions cannot be refunded");
+  if (!transactionId || typeof transactionId !== "string") {
+    throw new Error("transactionId is required and must be a non-empty string");
   }
 
-  transaction.status = "refunded";
-  transaction.refundedAt = new Date().toISOString();
-  transaction.updatedAt = new Date().toISOString();
-  await vault.save(transaction);
-
-  // Reverse revenue and downloads on listing
-  const listing = await vault.load("MarketplaceListing", transaction.listingId).catch(() => null);
-  if (listing) {
-    if (transaction.type !== "trial") {
-      listing.revenue = Math.max(0, Math.round(((listing.revenue || 0) - transaction.amount) * 100) / 100);
+  // All check-then-act logic inside the write lock to prevent double-refund race conditions
+  const doRefund = async () => {
+    const transaction = await vault.load("Transaction", transactionId).catch(() => null);
+    if (!transaction) {
+      throw new Error(`Transaction not found: ${transactionId}`);
     }
-    listing.downloads = Math.max(0, (listing.downloads || 0) - 1);
-    listing.updatedAt = new Date().toISOString();
-    await vault.save(listing);
-  }
+    if (transaction.status === "refunded") {
+      throw new Error("Transaction already refunded");
+    }
+    if (transaction.type === "trial") {
+      throw new Error("Trial transactions cannot be refunded");
+    }
 
-  return transaction;
+    transaction.status = "refunded";
+    transaction.refundedAt = new Date().toISOString();
+    transaction.updatedAt = new Date().toISOString();
+    await vault.save(transaction);
+
+    // Reverse revenue and downloads on listing
+    const listing = await vault.load("MarketplaceListing", transaction.listingId).catch(() => null);
+    if (listing) {
+      if (transaction.type !== "trial") {
+        listing.revenue = Math.max(0, Math.round(((listing.revenue || 0) - transaction.amount) * 100) / 100);
+      }
+      listing.downloads = Math.max(0, (listing.downloads || 0) - 1);
+      listing.updatedAt = new Date().toISOString();
+      await vault.save(listing);
+    }
+
+    return transaction;
+  };
+
+  if (typeof vault.withWriteLock === "function") {
+    return vault.withWriteLock(doRefund);
+  }
+  return doRefund();
 }
 
 /**
@@ -175,6 +200,7 @@ export async function refundTransaction(vault, transactionId) {
  */
 export async function getTransactionHistory(vault, options = {}) {
   const { buyerId, listingId, sellerId, limit = 50 } = options;
+  const safeLimit = Math.max(1, Math.min(500, Math.floor(Number(limit) || 50)));
   let transactions = await vault.list("Transaction");
 
   if (buyerId) {
@@ -189,7 +215,7 @@ export async function getTransactionHistory(vault, options = {}) {
 
   return transactions
     .sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""))
-    .slice(0, limit);
+    .slice(0, safeLimit);
 }
 
 /**
@@ -200,6 +226,9 @@ export async function getTransactionHistory(vault, options = {}) {
  * @returns {Promise<Object>} { totalRevenue, totalCommission, netRevenue, transactionCount, byType }
  */
 export async function getRevenueSummary(vault, sellerId) {
+  if (!sellerId || typeof sellerId !== "string") {
+    throw new Error("sellerId is required");
+  }
   const transactions = await vault.list("Transaction");
   const sellerTx = transactions.filter(
     (t) => t.sellerId === sellerId && t.status === "completed" && t.type !== "trial"
@@ -251,6 +280,12 @@ export async function getRevenueSummary(vault, sellerId) {
  * @returns {Promise<Object>} { hasLicense, licenseKey, licenseType, transactionId }
  */
 export async function verifyBuyerLicense(vault, listingId, buyerId) {
+  if (!listingId || typeof listingId !== "string") {
+    throw new Error("listingId is required");
+  }
+  if (!buyerId || typeof buyerId !== "string") {
+    throw new Error("buyerId is required");
+  }
   const transactions = await vault.list("Transaction");
   const license = transactions.find(
     (t) => t.listingId === listingId &&

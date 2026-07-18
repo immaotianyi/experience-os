@@ -12,7 +12,7 @@
  */
 
 import { createMarketplaceListing } from "./domain.js";
-import { validatePricing } from "./pricingEngine.js";
+import { validatePricing, validateLicenseType } from "./pricingEngine.js";
 import { slug } from "./utils.js";
 
 /**
@@ -38,44 +38,61 @@ export async function publishSkill(vault, {
   version = "1.0.0",
   summary = ""
 }) {
-  const skill = await vault.load("Skill", skillId).catch(() => null);
-  if (!skill) {
-    throw new Error(`Skill not found: ${skillId}`);
-  }
-  if (skill.status !== "stable") {
-    throw new Error(`Skill must be stable to publish, current status: ${skill.status}`);
+  if (!skillId || typeof skillId !== "string") {
+    throw new Error("skillId is required");
   }
 
+  // Validate pricing and license before entering the lock (pure checks)
   const pricingIssues = validatePricing(pricing);
   if (pricingIssues.length > 0) {
     throw new Error(`Invalid pricing: ${pricingIssues.join("; ")}`);
   }
-
-  // Check for existing active listing — bump version instead of duplicating
-  const existing = await vault.list("MarketplaceListing");
-  const priorActive = existing.find(
-    (l) => l.skillId === skillId && l.status === "active"
-  );
-  if (priorActive) {
-    throw new Error(`Skill ${skillId} already has an active listing: ${priorActive.id}. Unpublish or bump version first.`);
+  if (!validateLicenseType(license)) {
+    throw new Error(`Invalid license type: ${license}. Must be one of: MIT, Commercial, Team`);
   }
 
-  const id = `marketplace_listing.${slug(skillId)}.${slug(version)}.${Date.now()}`;
-  const listing = createMarketplaceListing({
-    id,
-    projectId: skill.projectId,
-    skillId,
-    sellerId,
-    version,
-    pricing,
-    license,
-    trialEnabled,
-    status: "active",
-    summary: summary || skill.name
-  });
+  // Check-then-act inside the write lock to prevent TOCTOU race:
+  // two concurrent publishSkill() calls could both pass the "no active listing"
+  // check and create duplicate active listings for the same skill.
+  const doPublish = async () => {
+    const skill = await vault.load("Skill", skillId).catch(() => null);
+    if (!skill) {
+      throw new Error(`Skill not found: ${skillId}`);
+    }
+    if (skill.status !== "stable") {
+      throw new Error(`Skill must be stable to publish, current status: ${skill.status}`);
+    }
 
-  await vault.save(listing);
-  return listing;
+    const existing = await vault.list("MarketplaceListing");
+    const priorActive = existing.find(
+      (l) => l.skillId === skillId && l.status === "active"
+    );
+    if (priorActive) {
+      throw new Error(`Skill ${skillId} already has an active listing: ${priorActive.id}. Unpublish or bump version first.`);
+    }
+
+    const id = `marketplace_listing.${slug(skillId)}.${slug(version)}.${Date.now()}`;
+    const listing = createMarketplaceListing({
+      id,
+      projectId: skill.projectId,
+      skillId,
+      sellerId,
+      version,
+      pricing,
+      license,
+      trialEnabled,
+      status: "active",
+      summary: summary || skill.name
+    });
+
+    await vault.save(listing);
+    return listing;
+  };
+
+  if (typeof vault.withWriteLock === "function") {
+    return vault.withWriteLock(doPublish);
+  }
+  return doPublish();
 }
 
 /**
@@ -86,6 +103,9 @@ export async function publishSkill(vault, {
  * @returns {Promise<Object>} updated listing
  */
 export async function unpublishSkill(vault, listingId) {
+  if (!listingId || typeof listingId !== "string") {
+    throw new Error("listingId is required");
+  }
   const listing = await vault.load("MarketplaceListing", listingId).catch(() => null);
   if (!listing) {
     throw new Error(`Listing not found: ${listingId}`);
@@ -100,6 +120,9 @@ export async function unpublishSkill(vault, listingId) {
  * Suspend a listing (platform action).
  */
 export async function suspendListing(vault, listingId) {
+  if (!listingId || typeof listingId !== "string") {
+    throw new Error("listingId is required");
+  }
   const listing = await vault.load("MarketplaceListing", listingId).catch(() => null);
   if (!listing) {
     throw new Error(`Listing not found: ${listingId}`);
@@ -125,6 +148,7 @@ export async function suspendListing(vault, listingId) {
  */
 export async function searchMarketplace(vault, options = {}) {
   const { query, license, pricingModel, sellerId, sortBy = "recent", limit = 20 } = options;
+  const safeLimit = Math.max(1, Math.min(500, Math.floor(Number(limit) || 20)));
 
   let listings = await vault.list("MarketplaceListing");
   listings = listings.filter((l) => l.status === "active");
@@ -184,7 +208,7 @@ export async function searchMarketplace(vault, options = {}) {
       break;
   }
 
-  return listings.slice(0, limit);
+  return listings.slice(0, safeLimit);
 }
 
 /**
@@ -195,6 +219,9 @@ export async function searchMarketplace(vault, options = {}) {
  * @returns {Promise<Object|null>} listing with skill + rating summary
  */
 export async function getListingDetails(vault, listingId) {
+  if (!listingId || typeof listingId !== "string") {
+    throw new Error("listingId is required");
+  }
   const listing = await vault.load("MarketplaceListing", listingId).catch(() => null);
   if (!listing) return null;
 
@@ -224,6 +251,9 @@ export async function getListingDetails(vault, listingId) {
  * @returns {Promise<Array<Object>>} sorted by publishedAt descending
  */
 export async function listPublishedVersions(vault, skillId) {
+  if (!skillId || typeof skillId !== "string") {
+    throw new Error("skillId is required");
+  }
   const listings = await vault.list("MarketplaceListing");
   return listings
     .filter((l) => l.skillId === skillId)
@@ -238,9 +268,15 @@ export async function listPublishedVersions(vault, skillId) {
  * @returns {Promise<Object>} updated listing
  */
 export async function recordDownload(vault, listingId) {
+  if (!listingId || typeof listingId !== "string") {
+    throw new Error("listingId is required");
+  }
   const listing = await vault.load("MarketplaceListing", listingId).catch(() => null);
   if (!listing) {
     throw new Error(`Listing not found: ${listingId}`);
+  }
+  if (listing.status !== "active") {
+    throw new Error(`Cannot download listing with status: ${listing.status}`);
   }
   listing.downloads = (listing.downloads || 0) + 1;
   listing.updatedAt = new Date().toISOString();
@@ -257,18 +293,35 @@ export async function recordDownload(vault, listingId) {
  * @returns {Promise<void>}
  */
 export async function syncListingRatings(vault, skillId) {
-  const ratings = (await vault.list("SkillRating")).filter((r) => r.skillId === skillId);
-  const ratingSum = ratings.reduce((acc, r) => acc + r.score, 0);
-  const ratingCount = ratings.length;
-
-  const listings = await vault.list("MarketplaceListing");
-  const forSkill = listings.filter((l) => l.skillId === skillId);
-  for (const listing of forSkill) {
-    listing.ratingSum = ratingSum;
-    listing.ratingCount = ratingCount;
-    listing.updatedAt = new Date().toISOString();
-    await vault.save(listing);
+  if (!skillId || typeof skillId !== "string") {
+    throw new Error("skillId is required");
   }
+
+  // Wrap read-then-write in the write lock to prevent TOCTOU race:
+  // a concurrent submitRating() could insert a new rating between our
+  // read of SkillRating and our write to MarketplaceListing, causing
+  // the listing cache to be stale.
+  // The lock is reentrant (writeLockDepth), so this is safe even when
+  // called from within submitRating's own withWriteLock callback.
+  const doSync = async () => {
+    const ratings = (await vault.list("SkillRating")).filter((r) => r.skillId === skillId);
+    const ratingSum = ratings.reduce((acc, r) => acc + r.score, 0);
+    const ratingCount = ratings.length;
+
+    const listings = await vault.list("MarketplaceListing");
+    const forSkill = listings.filter((l) => l.skillId === skillId);
+    for (const listing of forSkill) {
+      listing.ratingSum = ratingSum;
+      listing.ratingCount = ratingCount;
+      listing.updatedAt = new Date().toISOString();
+      await vault.save(listing);
+    }
+  };
+
+  if (typeof vault.withWriteLock === "function") {
+    return vault.withWriteLock(doSync);
+  }
+  return doSync();
 }
 
 /**

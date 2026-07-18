@@ -46,27 +46,37 @@ export async function submitRating(vault, { skillId, userId, score, review = "",
     throw new Error("score must be a number between 1 and 5");
   }
 
-  // Check for existing rating by same user on same skill — replace if found
-  const existing = await vault.list("SkillRating");
-  const prior = existing.find(
-    (r) => r.skillId === skillId && r.userId === userId
-  );
+  // All check-then-act logic inside the write lock to prevent TOCTOU race conditions
+  // where two concurrent requests could both pass the "no prior rating" check
+  // and create duplicate ratings.
+  const doSubmit = async () => {
+    // Check for existing rating by same user on same skill — replace if found
+    const existing = await vault.list("SkillRating");
+    const prior = existing.find(
+      (r) => r.skillId === skillId && r.userId === userId
+    );
 
-  if (prior) {
-    // Preserve original createdAt; update review fields
-    prior.score = score;
-    prior.review = review;
-    prior.updatedAt = new Date().toISOString();
-    await vault.save(prior);
+    if (prior) {
+      // Preserve original createdAt; update review fields
+      prior.score = score;
+      prior.review = review;
+      prior.updatedAt = new Date().toISOString();
+      await vault.save(prior);
+      await syncListingRatings(vault, skillId);
+      return prior;
+    }
+
+    const id = `rating.${slug(skillId)}.${slug(userId)}.${Date.now()}`;
+    const rating = createSkillRating({ id, projectId, skillId, userId, score, review });
+    await vault.save(rating);
     await syncListingRatings(vault, skillId);
-    return prior;
-  }
+    return rating;
+  };
 
-  const id = `rating.${slug(skillId)}.${slug(userId)}.${Date.now()}`;
-  const rating = createSkillRating({ id, projectId, skillId, userId, score, review });
-  await vault.save(rating);
-  await syncListingRatings(vault, skillId);
-  return rating;
+  if (typeof vault.withWriteLock === "function") {
+    return vault.withWriteLock(doSubmit);
+  }
+  return doSubmit();
 }
 
 /**
@@ -77,6 +87,9 @@ export async function submitRating(vault, { skillId, userId, score, review = "",
  * @returns {Promise<Object>} { average, count, distribution, ratings }
  */
 export async function getRatingSummary(vault, skillId) {
+  if (!skillId || typeof skillId !== "string") {
+    throw new Error("skillId is required");
+  }
   const all = await vault.list("SkillRating");
   const ratings = all.filter((r) => r.skillId === skillId);
 
@@ -87,7 +100,9 @@ export async function getRatingSummary(vault, skillId) {
   const sum = ratings.reduce((acc, r) => acc + r.score, 0);
   const distribution = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
   for (const r of ratings) {
-    distribution[r.score] = (distribution[r.score] || 0) + 1;
+    // Clamp score to integer 1-5 for distribution to handle non-integer scores
+    const bucket = Math.max(1, Math.min(5, Math.round(r.score)));
+    distribution[bucket] = (distribution[bucket] || 0) + 1;
   }
 
   return {
@@ -127,8 +142,9 @@ export function computeMarketQualityScore({
   // Usage frequency (25%): reuse + downloads
   const usageScore = Math.min((reuseCount * 5 + downloadCount * 0.5), 25);
 
-  // Approval rate (20%)
-  const approvalScore = approvalPct * 20;
+  // Approval rate (20%) — clamp to [0,1] to prevent scores exceeding 100
+  const clampedApproval = Math.max(0, Math.min(1, approvalPct || 0));
+  const approvalScore = clampedApproval * 20;
 
   // Review depth (20%): reviews + ratings
   const reviewDepthScore = Math.min((reviewCount * 3 + ratingCount * 2), 20);
@@ -162,6 +178,9 @@ export function computeQualityGrade(score) {
  * @returns {Promise<Object>} { skillId, score, grade, signals, shouldFlag }
  */
 export async function getSkillQualityReport(vault, skillId) {
+  if (!skillId || typeof skillId !== "string") {
+    throw new Error("skillId is required");
+  }
   const skill = await vault.load("Skill", skillId).catch(() => null);
   if (!skill) return null;
 
@@ -262,6 +281,7 @@ export async function autoFlagLowQuality(vault) {
  * @returns {Promise<Array<Object>>}
  */
 export async function getQualityLeaderboard(vault, limit = 10) {
+  const safeLimit = Math.max(1, Math.min(500, Math.floor(Number(limit) || 10)));
   const skills = await vault.list("Skill");
   const stable = skills.filter((s) => s.status === "stable" || s.status === "needs_revision");
 
@@ -273,5 +293,5 @@ export async function getQualityLeaderboard(vault, limit = 10) {
 
   return reports
     .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+    .slice(0, safeLimit);
 }

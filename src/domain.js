@@ -884,6 +884,7 @@ export function createSkillRating({
     userId,
     score,
     review,
-    createdAt: nowIso()
+    createdAt: nowIso(),
+    updatedAt: nowIso()
   };
 }

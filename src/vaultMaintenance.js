@@ -115,7 +115,7 @@ export async function archiveVaultCandidates({
   const manifestPath = path.join(manifestDir, `${archiveId}.json`);
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   if (movedRecords.length > 0 && typeof vault.commitAll === "function") {
-    vault.commitAll(`[VaultArchive] move ${movedRecords.length} records: ${archiveId}`);
+    await vault.commitAll(`[VaultArchive] move ${movedRecords.length} records: ${archiveId}`);
   }
 
   return {

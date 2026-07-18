@@ -117,6 +117,25 @@ function guardAiWrite(action, project, origin) {
 }
 
 /**
+ * Atomically append an ID to a project's array field (evidenceLinkIds or experienceReceiptIds).
+ * Re-loads the project inside the write lock to avoid TOCTOU race conditions.
+ */
+async function appendToProjectArray(vault, projectId, fieldName, newId) {
+  const doAppend = async () => {
+    const fresh = await vault.load("Project", projectId);
+    if (!fresh) throw new Error(`project not found: ${projectId}`);
+    const arr = [...(fresh[fieldName] || []), newId];
+    await vault.save({ ...fresh, [fieldName]: arr, updatedAt: nowIso() });
+  };
+  // Use write lock if available (GitVault); otherwise fall back to direct save
+  if (typeof vault.withWriteLock === "function") {
+    await vault.withWriteLock(doAppend);
+  } else {
+    await doAppend();
+  }
+}
+
+/**
  * Validate an uncertainty value: must be null, undefined, or a finite number in [0, 1].
  * Rejects NaN (which typeof reports as "number" but which is not a valid measurement).
  */
@@ -236,9 +255,10 @@ export async function addEvidenceLink(vault, {
   });
   await vault.save(link);
 
-  // Link it back to the project
-  const evidenceLinkIds = [...(project.evidenceLinkIds || []), id];
-  await vault.save({ ...project, evidenceLinkIds, updatedAt: nowIso() });
+  // Atomically append the evidence ID to the project's evidenceLinkIds.
+  // Re-load the project inside the write lock to avoid TOCTOU race conditions
+  // where two concurrent requests could overwrite each other's evidenceLinkIds.
+  await appendToProjectArray(vault, projectId, "evidenceLinkIds", id);
 
   return link;
 }
@@ -310,9 +330,8 @@ export async function writeExperienceReceipt(vault, {
   });
   await vault.save(receipt);
 
-  // Link it back to the project
-  const experienceReceiptIds = [...(project.experienceReceiptIds || []), id];
-  await vault.save({ ...project, experienceReceiptIds, updatedAt: nowIso() });
+  // Atomically append the receipt ID to the project's experienceReceiptIds.
+  await appendToProjectArray(vault, projectId, "experienceReceiptIds", id);
 
   return receipt;
 }
@@ -524,7 +543,7 @@ export async function recordOutcome(vault, {
   ensureObject(metrics, "metrics");
   ensureOrigin(origin);
   const project = await requireProject(vault, projectId);
-  guardAiWrite("record_decision", project, origin);
+  guardAiWrite("record_outcome", project, origin);
   const verifiedEvidenceIds = await requireProjectEvidence(vault, projectId, evidenceLinkIds);
   if (decisionReceiptId !== null) {
     ensureString(decisionReceiptId, "decisionReceiptId");
@@ -649,44 +668,58 @@ export async function captureWorkCheckpoint(vault, {
   ensureString(actor, "actor");
   if (consented !== true) throw new Error("work checkpoint requires explicit consent");
 
-  const project = await requireProject(vault, projectId);
-  const event = createConversationEvent({
-    id: eventId,
-    projectId,
-    actor,
-    content,
-    sourceTool,
-    sourceRef,
-    consented: true
-  });
-  const evidence = createEvidenceLink({
-    id: evidenceId,
-    projectId,
-    type: "observation",
-    title,
-    source: sourceRef ? `${sourceTool}:${sourceRef}` : `relay:${sourceTool}`,
-    notes,
-    origin: "relay",
-    actor
-  });
-  const checkpoint = createWorkCheckpoint({
-    id,
-    projectId,
-    title,
-    eventId,
-    evidenceLinkId: evidenceId,
-    notes
-  });
+  const writeCheckpoint = async () => {
+    // Check for duplicate IDs before writing
+    const existingEvent = await vault.load("ConversationEvent", eventId);
+    if (existingEvent) throw new Error(`conversation event already exists: ${eventId}`);
+    const existingEvidence = await vault.load("EvidenceLink", evidenceId);
+    if (existingEvidence) throw new Error(`evidence link already exists: ${evidenceId}`);
+    const existingCheckpoint = await vault.load("WorkCheckpoint", id);
+    if (existingCheckpoint) throw new Error(`work checkpoint already exists: ${id}`);
 
-  await vault.save(event);
-  await vault.save(evidence);
-  await vault.save({
-    ...project,
-    evidenceLinkIds: [...(project.evidenceLinkIds || []), evidenceId],
-    updatedAt: nowIso()
-  });
-  await vault.save(checkpoint);
-  return { checkpoint, event, evidence };
+    const project = await requireProject(vault, projectId);
+    const event = createConversationEvent({
+      id: eventId,
+      projectId,
+      actor,
+      content,
+      sourceTool,
+      sourceRef,
+      consented: true
+    });
+    const evidence = createEvidenceLink({
+      id: evidenceId,
+      projectId,
+      type: "observation",
+      title,
+      source: sourceRef ? `${sourceTool}:${sourceRef}` : `relay:${sourceTool}`,
+      notes,
+      origin: "relay",
+      actor
+    });
+    const checkpoint = createWorkCheckpoint({
+      id,
+      projectId,
+      title,
+      eventId,
+      evidenceLinkId: evidenceId,
+      notes
+    });
+
+    await vault.save(event);
+    await vault.save(evidence);
+    await vault.save({
+      ...project,
+      evidenceLinkIds: [...(project.evidenceLinkIds || []), evidenceId],
+      updatedAt: nowIso()
+    });
+    await vault.save(checkpoint);
+    return { checkpoint, event, evidence };
+  };
+
+  return typeof vault.withWriteLock === "function"
+    ? vault.withWriteLock(writeCheckpoint)
+    : writeCheckpoint();
 }
 
 /**

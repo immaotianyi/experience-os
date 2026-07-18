@@ -3,7 +3,7 @@ import { ToastProvider, useToast } from "./hooks/useToast.jsx";
 import { useTheme } from "./hooks/useTheme.js";
 import {
   IconOverview, IconReview, IconWall, IconSkills, IconAudit,
-  IconVault, IconMarket, IconQuality, IconRevenue,
+  IconVault, IconMarket, IconQuality, IconRevenue, IconProject,
   IconRefresh, IconClose, IconSun, IconMoon
 } from "./components/icons.jsx";
 import ProjectView from "./views/ProjectView.jsx";
@@ -19,7 +19,7 @@ import QualityView from "./views/QualityView.jsx";
 import SellerRevenueView from "./views/SellerRevenueView.jsx";
 
 const VIEWS = [
-  { id: "project", label: "项目", icon: IconOverview, key: "1" },
+  { id: "project", label: "项目", icon: IconProject, key: "1" },
   { id: "overview", label: "总览", icon: IconOverview, key: "2" },
   { id: "marketplace", label: "市场", icon: IconMarket, key: "3" },
   { id: "quality", label: "质量看板", icon: IconQuality, key: "4" },
@@ -105,6 +105,8 @@ function Workbench() {
               className={`rail-item ${activeView === v.id ? "active" : ""}`}
               onClick={() => setActiveView(v.id)}
               title={`${v.label} (${v.key})`}
+              aria-label={v.label}
+              aria-current={activeView === v.id ? "page" : undefined}
             >
               <Icon />
             </button>

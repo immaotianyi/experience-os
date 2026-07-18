@@ -68,8 +68,13 @@ export const ACTION_REGISTRY = Object.freeze({
   publish_skill: "execute",
   process_purchase: "execute",
   record_decision: "execute",
+  record_outcome: "execute",
+  capture_event: "execute",
+  capture_checkpoint: "execute",
   update_project: "execute",
   resolve_wallhit: "execute",
+  promote_asset: "execute",
+  reuse_feedback: "execute",
 
   // commit tier (4)
   delete_record: "commit",
