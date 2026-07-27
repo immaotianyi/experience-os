@@ -4,7 +4,7 @@ import { useTheme } from "./hooks/useTheme.js";
 import {
   IconOverview, IconReview, IconWall, IconSkills, IconAudit,
   IconVault, IconMarket, IconQuality, IconRevenue, IconProject,
-  IconRefresh, IconClose, IconSun, IconMoon, IconFeedback
+  IconRefresh, IconClose, IconSun, IconMoon, IconFeedback, IconPlatform
 } from "./components/icons.jsx";
 import AttentionBeacon from "./components/AttentionBeacon.jsx";
 import ProjectView from "./views/ProjectView.jsx";
@@ -20,6 +20,7 @@ import MarketplaceView from "./views/MarketplaceView.jsx";
 import QualityView from "./views/QualityView.jsx";
 import SellerRevenueView from "./views/SellerRevenueView.jsx";
 import BetaFeedbackView from "./views/BetaFeedbackView.jsx";
+import PlatformView from "./views/PlatformView.jsx";
 
 const RAIL_GROUPS = [
   { label: "主线", items: [
@@ -40,6 +41,7 @@ const RAIL_GROUPS = [
     { id: "audit", label: "决策审计", icon: IconAudit, key: "9" },
     { id: "vault", label: "Vault", icon: IconVault, key: "0" },
     { id: "feedback", label: "Beta 反馈", icon: IconFeedback, key: "f" },
+    { id: "platform", label: "平台兼容", icon: IconPlatform, key: "p" },
   ]},
 ];
 
@@ -61,7 +63,8 @@ const VIEW_TITLES = {
   skills: { eyebrow: "生产管道", title: "Skill 库" },
   audit: { eyebrow: "治理", title: "决策审计" },
   vault: { eyebrow: "治理", title: "Vault 维护" },
-  feedback: { eyebrow: "Beta", title: "Beta 反馈" }
+  feedback: { eyebrow: "Beta", title: "Beta 反馈" },
+  platform: { eyebrow: "平台兼容", title: "平台" }
 };
 
 function Workbench() {
@@ -129,6 +132,7 @@ function Workbench() {
       case "audit": return <AuditView {...props} />;
       case "vault": return <VaultView {...props} />;
       case "feedback": return <BetaFeedbackView {...props} />;
+      case "platform": return <PlatformView {...props} />;
       default: return null;
     }
   };

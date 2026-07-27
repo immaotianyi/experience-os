@@ -14,6 +14,7 @@ import { exportSkillAsMcpServer, exportAllStableSkills } from "./mcpExporter.js"
 import { buildLocalIndex, searchIndex, importSkill, getSkillMetadata, listCategories } from "./skillRegistry.js";
 import { assignReviewers, submitVote, addDiscussionComment, checkConfirmationStatus, finalizeTeamReview, getReviewSummary } from "./teamReviewEngine.js";
 import { applyOwnership, canRead, canEdit, canReview, filterReadable, contextFromRequest } from "./accessControl.js";
+import { checkPlatformHealth, tryStartPlatform, getInstallInstructions } from "./eosPlatformAdapter.js";
 import { publishSkill, unpublishSkill, suspendListing, searchMarketplace, getListingDetails, listPublishedVersions, recordDownload, getMarketplaceStats } from "./marketplace.js";
 import { submitRating, getRatingSummary, getSkillQualityReport, autoFlagLowQuality, getQualityLeaderboard } from "./qualityRating.js";
 import { validatePricing, calculateCommission, checkTrial, computePurchaseBreakdown, verifyLicenseKey } from "./pricingEngine.js";
@@ -200,6 +201,33 @@ async function handleApi(request, url, response) {
       mode: deploymentMode,
       generatedAt: new Date().toISOString()
     });
+    return;
+  }
+
+  if (url.pathname === "/api/platforms" && request.method === "GET") {
+    try {
+      const health = await checkPlatformHealth();
+      for (const name of Object.keys(health.platforms)) {
+        try {
+          health.platforms[name].instructions = getInstallInstructions(name);
+        } catch { /* unknown platform — skip instructions */ }
+      }
+      sendJson(response, health);
+    } catch (error) {
+      sendJson(response, { error: error.message }, 500);
+    }
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/platforms/") && url.pathname.endsWith("/start") && request.method === "POST") {
+    const name = url.pathname.slice("/api/platforms/".length, -"/start".length);
+    try {
+      const body = await readJsonBody(request).catch(() => ({}));
+      const result = await tryStartPlatform(name, body || {});
+      sendJson(response, result);
+    } catch (error) {
+      sendJson(response, { started: false, message: error.message }, 400);
+    }
     return;
   }
 
