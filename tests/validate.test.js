@@ -22,6 +22,7 @@ import {
   validateReviewPacket,
   validateReviewDecision,
   validateReuseContext,
+  validateExperienceReuseTrial,
   validateSelfIterationRun,
   validateRecord,
   wallTypeForIssue
@@ -87,6 +88,18 @@ describe("validateWallHit", () => {
 
   it("fails for missing wallType", () => {
     assert.ok(validateWallHit({ id: "w1", projectId: "p1", stage: "s", message: "m", blockedBy: [], suggestedFixes: [] }).length > 0);
+  });
+});
+
+describe("validateExperienceReuseTrial", () => {
+  it("requires a bounded adopted trial and a valid outcome when completed", () => {
+    const trial = {
+      id: "reuse_trial.1", kind: "ExperienceReuseTrial", projectId: "target", assetId: "asset.1", sourceProjectId: "source",
+      taskTitle: "Use prior lesson", decision: "adopted", decisionNote: "", outcome: "success", outcomeNote: "worked",
+      reducedRepeatedDecision: true, completedAt: new Date().toISOString()
+    };
+    assert.equal(validateExperienceReuseTrial(trial).length, 0);
+    assert.ok(validateExperienceReuseTrial({ ...trial, outcome: "unknown" }).some((issue) => issue.includes("outcome")));
   });
 });
 

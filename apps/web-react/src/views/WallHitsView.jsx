@@ -1,15 +1,20 @@
 import { useState } from "react";
 import { useFetch } from "../hooks/useFetch.js";
 import { resolveWallHit } from "../api/core.js";
+import { TrustTag, ConfirmButton, shortId } from "../components/trust.jsx";
 
 function WallHitCard({ hit, onResolve }) {
   const [resolving, setResolving] = useState(false);
-  const statusTag = hit.status === "open" ? "bad" : hit.status === "resolved" ? "ok" : "";
+  const [rationale, setRationale] = useState("");
+  const trust = hit.status === "open"
+    ? { level: "draft", label: "待处理" }
+    : { level: "confirmed", label: "已解决" };
 
   const handleResolve = async () => {
     setResolving(true);
-    await onResolve(hit.id);
+    const ok = await onResolve(hit.id, rationale.trim() || undefined);
     setResolving(false);
+    if (ok) setRationale("");
   };
 
   return (
@@ -17,20 +22,38 @@ function WallHitCard({ hit, onResolve }) {
       <header>
         <div>
           <h3>{hit.wallType}</h3>
-          <p className="muted" style={{ margin: "4px 0 0", fontSize: "12px" }}>{hit.stage}</p>
+          <p className="muted" style={{ margin: "4px 0 0", fontSize: "12px" }}>
+            {hit.stage}{hit.id ? ` · ${shortId(hit.id)}` : ""}
+          </p>
         </div>
-        <span className={`pill ${statusTag}`}>{hit.status}</span>
+        <TrustTag level={trust.level}>{trust.label}</TrustTag>
       </header>
       <p className="body-copy" style={{ fontSize: "13px" }}>{hit.message}</p>
       {hit.suggestedFixes?.length > 0 && (
-        <ul style={{ margin: "8px 0 0", paddingLeft: "18px", fontSize: "12px", color: "var(--muted)" }}>
-          {hit.suggestedFixes.slice(0, 3).map((f, i) => <li key={i}>{f}</li>)}
-        </ul>
+        <div className="wallhit-fixes">
+          <span className="binding-label">建议修复</span>
+          <ul>
+            {hit.suggestedFixes.slice(0, 3).map((f, i) => <li key={i}>{f}</li>)}
+          </ul>
+        </div>
       )}
       {hit.status === "open" && (
-        <button className="text-button" onClick={handleResolve} disabled={resolving}>
-          {resolving ? "处理中..." : "标记已解决"}
-        </button>
+        <div className="wallhit-resolve">
+          <input
+            type="text"
+            className="rationale-input"
+            placeholder="解决说明（可选，记录你做了什么）"
+            value={rationale}
+            onChange={(e) => setRationale(e.target.value)}
+            disabled={resolving}
+          />
+          <ConfirmButton
+            label="标记已解决"
+            confirmLabel="确认解决？再次点击"
+            onConfirm={handleResolve}
+            busy={resolving}
+          />
+        </div>
       )}
     </div>
   );
@@ -40,17 +63,19 @@ export default function WallHitsView({ refreshKey, toast }) {
   const url = `/api/wallhits?limit=40&t=${refreshKey}`;
   const { data, loading, error, refresh } = useFetch(url);
 
-  const handleResolve = async (wallHitId) => {
+  const handleResolve = async (wallHitId, rationale) => {
     try {
-      const result = await resolveWallHit({ wallHitId });
+      const result = await resolveWallHit({ wallHitId, rationale });
       if (result.error) {
         toast(result.error, "bad");
-      } else {
-        toast("已标记为已解决", "ok");
-        refresh();
+        return false;
       }
+      toast("已标记为已解决", "ok");
+      refresh();
+      return true;
     } catch (err) {
       toast(err.message, "bad", "操作失败");
+      return false;
     }
   };
 

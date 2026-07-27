@@ -15,12 +15,12 @@ function TransactionRow({ tx, onRefund, sellerView }) {
 
   return (
     <tr>
-      <td style={{ fontSize: "11px", fontFamily: "monospace" }}>{tx.id.slice(0, 24)}...</td>
+      <td style={{ fontSize: "11px", fontFamily: "monospace" }}>{tx.id?.slice(0, 24) || "—"}...</td>
       <td>{tx.buyerId}</td>
       <td style={{ textAlign: "center" }}>{tx.type}</td>
-      <td style={{ textAlign: "right" }}>¥{tx.amount?.toFixed(2)}</td>
-      <td style={{ textAlign: "right" }}>¥{tx.commission?.toFixed(2)}</td>
-      <td style={{ textAlign: "right" }}>¥{tx.netToSeller?.toFixed(2)}</td>
+      <td style={{ textAlign: "right" }}>¥{tx.amount?.toFixed(2) ?? "0.00"}</td>
+      <td style={{ textAlign: "right" }}>¥{tx.commission?.toFixed(2) ?? "0.00"}</td>
+      <td style={{ textAlign: "right" }}>¥{tx.netToSeller?.toFixed(2) ?? "0.00"}</td>
       <td style={{ textAlign: "center" }}><span className={`pill ${statusTag}`}>{tx.status}</span></td>
       <td style={{ fontSize: "11px", fontFamily: "monospace" }}>{tx.licenseKey?.slice(0, 20) || "—"}...</td>
       {sellerView && tx.status === "completed" && tx.type !== "trial" && (
@@ -40,8 +40,8 @@ export default function SellerRevenueView({ refreshKey, toast }) {
 
   const revenueUrl = `/api/transaction/revenue?sellerId=${encodeURIComponent(activeSeller)}&t=${refreshKey}`;
   const historyUrl = `/api/transaction/history?sellerId=${encodeURIComponent(activeSeller)}&limit=50&t=${refreshKey}`;
-  const { data: revenue, loading: revLoading, refresh: revRefresh } = useFetch(revenueUrl);
-  const { data: historyData, loading: histLoading, refresh: histRefresh } = useFetch(historyUrl);
+  const { data: revenue, loading: revLoading, error: revError, refresh: revRefresh } = useFetch(revenueUrl);
+  const { data: historyData, loading: histLoading, error: histError, refresh: histRefresh } = useFetch(historyUrl);
 
   const handleSearch = () => {
     if (sellerId.trim()) {
@@ -63,8 +63,18 @@ export default function SellerRevenueView({ refreshKey, toast }) {
   const r = revenue || {};
   const transactions = historyData?.transactions || [];
 
+  if ((revLoading && !revenue) || (histLoading && !historyData)) {
+    return <div className="skeleton" style={{ height: "200px" }}>加载中</div>;
+  }
+
   return (
     <>
+      {(revError || histError) && (
+        <div className="error-banner" style={{ marginBottom: "14px" }}>
+          <span>{revError || histError}</span>
+          <button onClick={() => { revRefresh(); histRefresh(); }}>重试</button>
+        </div>
+      )}
       {/* Seller selector */}
       <div className="filters">
         <div className="search" style={{ minWidth: "300px" }}>
@@ -117,7 +127,7 @@ export default function SellerRevenueView({ refreshKey, toast }) {
               {r.topSkills.map((s) => (
                 <tr key={s.skillId}>
                   <td>{s.skillId}</td>
-                  <td style={{ textAlign: "right" }}>¥{s.revenue?.toFixed(2)}</td>
+                  <td style={{ textAlign: "right" }}>¥{s.revenue?.toFixed(2) ?? "0.00"}</td>
                   <td style={{ textAlign: "center" }}>{s.count}</td>
                 </tr>
               ))}

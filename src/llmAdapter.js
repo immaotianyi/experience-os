@@ -4,6 +4,7 @@
  * Design:
  * - MockAdapter: deterministic responses for testing and offline dev (default).
  * - OpenAIAdapter: calls OpenAI Chat Completions API.
+ * - DeepSeekAdapter: calls DeepSeek's OpenAI-compatible Chat Completions API.
  * - AnthropicAdapter: calls Anthropic Messages API.
  * - createLLMAdapter(): factory that reads env vars to pick adapter.
  *
@@ -43,6 +44,8 @@ import { nowIso } from "./domain.js";
 export class BaseLLMAdapter {
   constructor(options = {}) {
     this.name = "base";
+    this.mode = "unknown";
+    this.fallbackReason = null;
     this.defaultModel = options.model || "mock-1";
     this.defaultMaxTokens = options.maxTokens || 4096;
     this.defaultTemperature = options.temperature ?? 0.7;
@@ -109,6 +112,8 @@ export class MockLLMAdapter extends BaseLLMAdapter {
     super(options);
     this.name = "mock";
     this.defaultModel = "mock-1";
+    this.mode = "rehearsal";
+    this.fallbackReason = options.fallbackReason || null;
   }
 
   async _doComplete(request) {
@@ -169,18 +174,20 @@ export class MockLLMAdapter extends BaseLLMAdapter {
 
 /**
  * OpenAI adapter — calls Chat Completions API.
- * Requires OPENAI_API_KEY environment variable.
+ * Requires OPENAI_API_KEY environment variable by default.
  */
 export class OpenAILLMAdapter extends BaseLLMAdapter {
   constructor(options = {}) {
     super(options);
     this.name = "openai";
+    this.mode = "live";
     this.defaultModel = options.model || "gpt-4o";
-    this.apiKey = options.apiKey || process.env.OPENAI_API_KEY;
+    this.apiKeyEnvName = options.apiKeyEnvName || "OPENAI_API_KEY";
+    this.apiKey = options.apiKey || process.env[this.apiKeyEnvName];
     this.baseURL = options.baseURL || "https://api.openai.com/v1";
 
     if (!this.apiKey) {
-      throw new Error("OPENAI_API_KEY environment variable is required for OpenAILLMAdapter");
+      throw new Error(`${this.apiKeyEnvName} environment variable is required for OpenAILLMAdapter`);
     }
   }
 
@@ -231,6 +238,24 @@ export class OpenAILLMAdapter extends BaseLLMAdapter {
 }
 
 /**
+ * DeepSeek adapter — explicit provider identity over the OpenAI-compatible
+ * endpoint. Keeping it distinct makes provenance and billing review legible.
+ */
+export class DeepSeekLLMAdapter extends OpenAILLMAdapter {
+  constructor(options = {}) {
+    super({
+      ...options,
+      apiKeyEnvName: "DEEPSEEK_API_KEY",
+      // DeepSeek's current OpenAI-compatible endpoint accepts the v4 family.
+      // Flash is the conservative Alpha default; callers may opt into Pro.
+      model: options.model || "deepseek-v4-flash",
+      baseURL: options.baseURL || "https://api.deepseek.com/v1"
+    });
+    this.name = "deepseek";
+  }
+}
+
+/**
  * Anthropic adapter — calls Messages API.
  * Requires ANTHROPIC_API_KEY environment variable.
  */
@@ -238,6 +263,7 @@ export class AnthropicLLMAdapter extends BaseLLMAdapter {
   constructor(options = {}) {
     super(options);
     this.name = "anthropic";
+    this.mode = "live";
     this.defaultModel = options.model || "claude-sonnet-4-20250514";
     this.apiKey = options.apiKey || process.env.ANTHROPIC_API_KEY;
     this.baseURL = options.baseURL || "https://api.anthropic.com";
@@ -298,9 +324,9 @@ export class AnthropicLLMAdapter extends BaseLLMAdapter {
  *
  * Priority:
  * 1. LLM_PROVIDER=openai → OpenAILLMAdapter
- * 2. LLM_PROVIDER=anthropic → AnthropicLLMAdapter
- * 3. OPENAI_API_KEY set → OpenAILLMAdapter
- * 4. ANTHROPIC_API_KEY set → AnthropicLLMAdapter
+ * 2. LLM_PROVIDER=deepseek → DeepSeekLLMAdapter
+ * 3. LLM_PROVIDER=anthropic → AnthropicLLMAdapter
+ * 4. provider-specific key set → matching live adapter
  * 5. Default → MockLLMAdapter
  *
  * @param {Object} options - Override defaults
@@ -308,12 +334,23 @@ export class AnthropicLLMAdapter extends BaseLLMAdapter {
  */
 export function createLLMAdapter(options = {}) {
   const provider = (options.provider || process.env.LLM_PROVIDER || "").toLowerCase();
+  let fallbackReason = null;
 
   if (provider === "openai" || (!provider && process.env.OPENAI_API_KEY)) {
     try {
       return new OpenAILLMAdapter(options);
     } catch (e) {
       console.warn(`[LLM] Failed to init OpenAI adapter: ${e.message}, falling back to mock`);
+      fallbackReason = `OpenAI initialization failed: ${e.message}`;
+    }
+  }
+
+  if (provider === "deepseek" || (!provider && process.env.DEEPSEEK_API_KEY)) {
+    try {
+      return new DeepSeekLLMAdapter(options);
+    } catch (e) {
+      console.warn(`[LLM] Failed to init DeepSeek adapter: ${e.message}, falling back to mock`);
+      fallbackReason = `DeepSeek initialization failed: ${e.message}`;
     }
   }
 
@@ -322,10 +359,17 @@ export function createLLMAdapter(options = {}) {
       return new AnthropicLLMAdapter(options);
     } catch (e) {
       console.warn(`[LLM] Failed to init Anthropic adapter: ${e.message}, falling back to mock`);
+      fallbackReason = `Anthropic initialization failed: ${e.message}`;
     }
   }
 
-  return new MockLLMAdapter(options);
+  if (!fallbackReason && provider && provider !== "mock") {
+    fallbackReason = `Unsupported or unconfigured LLM provider: ${provider}`;
+  }
+  if (!fallbackReason && !provider) {
+    fallbackReason = "No live LLM provider is configured";
+  }
+  return new MockLLMAdapter({ ...options, fallbackReason });
 }
 
 /**

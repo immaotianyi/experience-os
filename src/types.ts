@@ -123,6 +123,8 @@ export interface EvidenceLink extends BaseRecord {
   tags?: string[];
   origin?: "human" | "relay" | "ai";
   actor?: string;
+  /** Strict external-capture permit that authorized this source, if any. */
+  capturePermitId?: string | null;
 }
 
 export interface ExperienceReceiptDraft extends BaseRecord {
@@ -137,8 +139,9 @@ export interface ExperienceReceiptDraft extends BaseRecord {
   counterexamples: string[];
   applicabilityBounds: string[];
   lessonsLearned: string[];
-  generatedBy: { provider: string; model: string; usage?: { promptTokens: number; completionTokens: number } };
-  status: "pending_review" | "accepted" | "rejected";
+  generationWarnings?: string[];
+  generatedBy: { provider: string; model: string; mode?: "live" | "rehearsal" | "agent_hosted"; actor?: string; sourceTool?: string; usage?: { promptTokens: number; completionTokens: number } };
+  status: "pending_review" | "deferred" | "accepted" | "rejected";
 }
 
 export interface ExperienceReceipt extends BaseRecord {
@@ -196,6 +199,8 @@ export interface ConversationEvent extends BaseRecord {
   sourceTool: string;
   sourceRef?: string | null;
   consented: boolean;
+  /** Strict external-capture permit that authorized this event, if any. */
+  capturePermitId?: string | null;
 }
 
 export interface ExperienceAsset extends BaseRecord {
@@ -209,6 +214,32 @@ export interface ExperienceAsset extends BaseRecord {
   approvedBy?: string | null;
 }
 
+export interface ExperienceReuseTrial extends BaseRecord {
+  kind: "ExperienceReuseTrial";
+  projectId: string;
+  assetId: string;
+  sourceProjectId: string;
+  taskTitle: string;
+  decision: "adopted";
+  decisionNote: string;
+  outcome: "success" | "partial" | "failure" | null;
+  outcomeNote: string;
+  reducedRepeatedDecision: boolean | null;
+  completedAt: string | null;
+}
+
+export interface BetaFeedback extends BaseRecord {
+  kind: "BetaFeedback";
+  participantId: string;
+  stage: "first_impression" | "after_trying" | "blocked";
+  usefulness: 1 | 2 | 3 | 4 | 5;
+  clarity: 1 | 2 | 3 | 4 | 5;
+  wouldUseAgain: "yes" | "no" | "unsure";
+  helped: string;
+  blocked: string;
+  contact: string | null;
+}
+
 export interface WorkCheckpoint extends BaseRecord {
   kind: "WorkCheckpoint";
   projectId: string;
@@ -217,6 +248,8 @@ export interface WorkCheckpoint extends BaseRecord {
   evidenceLinkId: string;
   notes: string;
   status: "captured";
+  /** Strict external-capture permit that authorized this work boundary, if any. */
+  capturePermitId?: string | null;
 }
 
 export interface ThoughtFragment extends BaseRecord {
@@ -512,6 +545,8 @@ export type AnyRecord =
   | DecisionReceipt
   | OutcomeRecord
   | ExperienceAsset
+  | ExperienceReuseTrial
+  | BetaFeedback
   | WorkCheckpoint;
 
 // ============================================================================

@@ -32,10 +32,17 @@ import {
   captureCollaborationEvent,
   captureWorkCheckpoint,
   proposeExperienceReceiptDraft,
+  submitAgentExperienceReceiptDraft,
   acceptExperienceReceiptDraft,
   rejectExperienceReceiptDraft,
+  deferExperienceReceiptDraft,
+  resumeExperienceReceiptDraft,
   promoteExperienceAsset,
-  getProjectReadiness
+  getProjectReadiness,
+  getProjectTrialEvidence,
+  startExperienceReuseTrial,
+  completeExperienceReuseTrial,
+  listExperienceReuseTrials
 } from "../src/projectEngine.js";
 
 let tmpDir;
@@ -280,6 +287,43 @@ describe("provenance and autonomy guardrails", () => {
   });
 });
 
+describe("Experience reuse trials", () => {
+  it("links an adopted cross-project asset to an observed task result", async () => {
+    await startProject(vault, { id: "project.source", name: "Source", goal: "g" });
+    await startProject(vault, { id: "project.target", name: "Target", goal: "g" });
+    await vault.save({
+      id: "asset.approved", kind: "ExperienceAsset", projectId: "project.source", receiptId: "receipt.source",
+      decisionReceiptId: "decision.source", outcomeRecordId: "outcome.source", title: "Verified source experience",
+      status: "approved", approvedBy: "human", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+    });
+
+    const trial = await startExperienceReuseTrial(vault, {
+      id: "reuse_trial.target", projectId: "project.target", assetId: "asset.approved", taskTitle: "Set up a second project safely"
+    });
+    assert.equal(trial.outcome, null);
+    const completed = await completeExperienceReuseTrial(vault, {
+      id: trial.id, projectId: "project.target", outcome: "success", reducedRepeatedDecision: true,
+      outcomeNote: "The existing boundary rule avoided repeating the setup decision."
+    });
+    assert.equal(completed.reducedRepeatedDecision, true);
+    assert.equal((await listExperienceReuseTrials(vault, "project.target")).length, 1);
+    assert.equal((await getProjectTrialEvidence(vault, "project.target")).interpretation.isSufficientForValueClaim, true);
+    await assert.rejects(
+      () => completeExperienceReuseTrial(vault, { id: trial.id, projectId: "project.target", outcome: "success", reducedRepeatedDecision: true }),
+      /already completed/
+    );
+  });
+
+  it("refuses same-project or unapproved experiences", async () => {
+    await startProject(vault, { id: "project.only", name: "Only", goal: "g" });
+    await vault.save({ id: "asset.same", kind: "ExperienceAsset", projectId: "project.only", receiptId: "r", decisionReceiptId: "d", outcomeRecordId: "o", title: "same", status: "approved", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    await assert.rejects(
+      () => startExperienceReuseTrial(vault, { id: "reuse_trial.same", projectId: "project.only", assetId: "asset.same", taskTitle: "repeat" }),
+      /another project/
+    );
+  });
+});
+
 describe("captureWorkCheckpoint", () => {
   it("requires explicit consent before saving any grouped work record", async () => {
     await startProject(vault, { id: "project.checkpoint.no", name: "x", goal: "g" });
@@ -299,11 +343,15 @@ describe("captureWorkCheckpoint", () => {
       id: "checkpoint.yes", eventId: "event.yes", evidenceId: "evidence.yes",
       projectId: "project.checkpoint.yes", title: "Diagnosed the failing test",
       content: "The test passed after the schema was corrected.", sourceTool: "codex",
-      notes: "Keep the test as the verification boundary.", consented: true
+      notes: "Keep the test as the verification boundary.", consented: true,
+      capturePermitId: "capture_permit.test_provenance"
     });
     assert.equal(captured.checkpoint.status, "captured");
     assert.equal(captured.event.consented, true);
     assert.equal(captured.evidence.type, "observation");
+    assert.equal(captured.event.capturePermitId, "capture_permit.test_provenance");
+    assert.equal(captured.evidence.capturePermitId, "capture_permit.test_provenance");
+    assert.equal(captured.checkpoint.capturePermitId, "capture_permit.test_provenance");
     assert.equal((await getProject(vault, "project.checkpoint.yes")).evidenceLinkIds[0], "evidence.yes");
     const timeline = await buildProjectTimeline(vault, "project.checkpoint.yes");
     assert.equal(timeline.counts.checkpoints, 1);
@@ -334,6 +382,30 @@ describe("captureWorkCheckpoint", () => {
     const timeline = await buildProjectTimeline(vault, "project.checkpoint.parallel");
     assert.equal(timeline.counts.checkpoints, 2);
   });
+
+  it("rolls back the full source chain when checkpoint persistence fails", async () => {
+    await vault.init();
+    await startProject(vault, { id: "project.checkpoint.rollback", name: "x", goal: "g" });
+    const originalSave = vault.vault.save.bind(vault.vault);
+    vault.vault.save = async (record) => {
+      if (record.kind === "WorkCheckpoint") throw new Error("injected checkpoint failure");
+      return originalSave(record);
+    };
+
+    await assert.rejects(
+      () => captureWorkCheckpoint(vault, {
+        id: "checkpoint.rollback", eventId: "event.rollback", evidenceId: "evidence.rollback",
+        projectId: "project.checkpoint.rollback", title: "Must not be partial", content: "A failed write must leave no source chain.",
+        sourceTool: "trae", consented: true
+      }),
+      /injected checkpoint failure/
+    );
+
+    assert.equal(await vault.load("ConversationEvent", "event.rollback"), null);
+    assert.equal(await vault.load("EvidenceLink", "evidence.rollback"), null);
+    assert.equal(await vault.load("WorkCheckpoint", "checkpoint.rollback"), null);
+    assert.deepEqual((await getProject(vault, "project.checkpoint.rollback")).evidenceLinkIds, []);
+  });
 });
 
 describe("Experience Receipt drafts", () => {
@@ -353,6 +425,104 @@ describe("Experience Receipt drafts", () => {
     const accepted = await acceptExperienceReceiptDraft(vault, { draftId: draft.id, receiptId: "receipt.fromdraft", actor: "human" });
     assert.equal(accepted.draft.status, "accepted");
     assert.equal(accepted.receipt.sourceDraftId, draft.id);
+    const evidence = await getProjectTrialEvidence(vault, "project.draft");
+    assert.equal(evidence.draftReview.handled, 1);
+    assert.equal(evidence.evidenceCoverage.ratio, 1);
+    assert.equal(evidence.verification.approvedAssets, 0);
+    assert.equal(evidence.interpretation.isSufficientForValueClaim, false);
+  });
+
+  it("degrades malformed model uncertainty to an explicit human-visible warning", async () => {
+    await startProject(vault, { id: "project.draft.normalized", name: "x", goal: "g" });
+    await captureWorkCheckpoint(vault, {
+      id: "checkpoint.draft.normalized", eventId: "event.draft.normalized", evidenceId: "evidence.draft.normalized",
+      projectId: "project.draft.normalized", title: "Schema resilience", content: "A model may explain uncertainty instead of returning a number.",
+      sourceTool: "codex", consented: true
+    });
+    const llm = {
+      name: "test-live",
+      mode: "live",
+      complete: async () => ({
+        content: JSON.stringify({ phase: "test", summary: "A sourced draft.", outcome: "not a controlled outcome", uncertainty: "not numerically calibrated", counterexamples: "one counterexample", applicabilityBounds: "one boundary", lessonsLearned: "one lesson" }),
+        model: "test-model",
+        usage: { promptTokens: 1, completionTokens: 1 }
+      })
+    };
+    const draft = await proposeExperienceReceiptDraft(vault, llm, {
+      id: "draft.normalized", projectId: "project.draft.normalized", checkpointIds: ["checkpoint.draft.normalized"]
+    });
+    assert.equal(draft.uncertainty, null);
+    assert.equal(draft.outcome, "unknown");
+    assert.deepEqual(draft.counterexamples, ["one counterexample"]);
+    assert.deepEqual(draft.applicabilityBounds, ["one boundary"]);
+    assert.equal(draft.generationWarnings.length, 5);
+  });
+
+  it("accepts an active-agent draft without an EOS API call and still requires human acceptance", async () => {
+    await startProject(vault, { id: "project.agent.hosted", name: "x", goal: "g" });
+    await captureWorkCheckpoint(vault, {
+      id: "checkpoint.agent.hosted", eventId: "event.agent.hosted", evidenceId: "evidence.agent.hosted",
+      projectId: "project.agent.hosted", title: "Agent-hosted proposal", content: "The current coding agent already has this consented context.",
+      sourceTool: "codex", consented: true
+    });
+    const draft = await submitAgentExperienceReceiptDraft(vault, {
+      id: "receipt_draft.agent.hosted",
+      projectId: "project.agent.hosted",
+      checkpointIds: ["checkpoint.agent.hosted"],
+      proposal: {
+        phase: "协作", summary: "当前工具可在不暴露 EOS Key 的情况下提交候选草案。",
+        outcome: "natural language claim", uncertainty: "low", counterexamples: "没有第二个工具的对照", applicabilityBounds: "仅适用于支持 MCP 的当前会话", lessonsLearned: "人类仍需确认"
+      },
+      agent: { provider: "codex", model: "hosted-session", actor: "codex-agent", sourceTool: "codex" }
+    });
+    assert.equal(draft.status, "pending_review");
+    assert.equal(draft.generatedBy.mode, "agent_hosted");
+    assert.equal(draft.outcome, "unknown");
+    assert.equal(draft.uncertainty, null);
+    assert.ok(draft.generationWarnings.some((warning) => warning.includes("没有调用或保存")));
+    assert.equal(await vault.load("ExperienceReceipt", "receipt.agent.hosted"), null);
+  });
+
+  it("refuses an agent-hosted draft that cites another project's checkpoint", async () => {
+    await startProject(vault, { id: "project.agent.a", name: "a", goal: "g" });
+    await startProject(vault, { id: "project.agent.b", name: "b", goal: "g" });
+    await captureWorkCheckpoint(vault, {
+      id: "checkpoint.agent.b", eventId: "event.agent.b", evidenceId: "evidence.agent.b",
+      projectId: "project.agent.b", title: "Private", content: "Not shareable across projects.", sourceTool: "codex", consented: true
+    });
+    await assert.rejects(() => submitAgentExperienceReceiptDraft(vault, {
+      id: "receipt_draft.agent.bad", projectId: "project.agent.a", checkpointIds: ["checkpoint.agent.b"],
+      proposal: { summary: "Must fail." }, agent: { provider: "codex", model: "hosted-session", actor: "codex-agent" }
+    }), /belongs to another project/);
+  });
+
+  it("rolls back receipt creation when draft acceptance cannot be persisted", async () => {
+    await vault.init();
+    await startProject(vault, { id: "project.draft.rollback", name: "x", goal: "g" });
+    await captureWorkCheckpoint(vault, {
+      id: "checkpoint.draft.rollback", eventId: "event.draft.rollback", evidenceId: "evidence.draft.rollback",
+      projectId: "project.draft.rollback", title: "Transaction boundary", content: "Draft confirmation must be all or nothing.",
+      sourceTool: "trae", consented: true
+    });
+    const draft = await proposeExperienceReceiptDraft(vault, new MockLLMAdapter(), {
+      id: "receipt_draft.rollback", projectId: "project.draft.rollback", checkpointIds: ["checkpoint.draft.rollback"]
+    });
+    const originalSave = vault.vault.save.bind(vault.vault);
+    vault.vault.save = async (record) => {
+      if (record.kind === "ExperienceReceiptDraft" && record.status === "accepted") {
+        throw new Error("injected draft acceptance failure");
+      }
+      return originalSave(record);
+    };
+
+    await assert.rejects(
+      () => acceptExperienceReceiptDraft(vault, { draftId: draft.id, receiptId: "receipt.rollback", actor: "human" }),
+      /injected draft acceptance failure/
+    );
+
+    assert.equal(await vault.load("ExperienceReceipt", "receipt.rollback"), null);
+    assert.equal((await vault.load("ExperienceReceiptDraft", draft.id)).status, "pending_review");
+    assert.deepEqual((await getProject(vault, "project.draft.rollback")).experienceReceiptIds, []);
   });
 
   it("refuses drafts from another project's checkpoint and keeps rejection reversible at the source level", async () => {
@@ -370,6 +540,24 @@ describe("Experience Receipt drafts", () => {
     const rejected = await rejectExperienceReceiptDraft(vault, { draftId: draft.id, actor: "human", reason: "too broad" });
     assert.equal(rejected.status, "rejected");
     assert.ok(await vault.load("WorkCheckpoint", "checkpoint.draft.b"));
+  });
+
+  it("allows a human to defer rather than silently abandon a pending draft", async () => {
+    await startProject(vault, { id: "project.draft.defer", name: "x", goal: "g" });
+    await captureWorkCheckpoint(vault, {
+      id: "checkpoint.draft.defer", eventId: "event.draft.defer", evidenceId: "evidence.draft.defer",
+      projectId: "project.draft.defer", title: "Need more evidence", content: "One observation is not enough.", sourceTool: "codex", consented: true
+    });
+    const draft = await proposeExperienceReceiptDraft(vault, new MockLLMAdapter(), {
+      id: "receipt_draft.defer", projectId: "project.draft.defer", checkpointIds: ["checkpoint.draft.defer"]
+    });
+    const deferred = await deferExperienceReceiptDraft(vault, { draftId: draft.id, actor: "human", reason: "wait for a second project" });
+    assert.equal(deferred.status, "deferred");
+    assert.equal(deferred.deferralReason, "wait for a second project");
+    await assert.rejects(() => acceptExperienceReceiptDraft(vault, { draftId: draft.id, receiptId: "receipt.defer", actor: "human" }), /only a pending/);
+    const resumed = await resumeExperienceReceiptDraft(vault, { draftId: draft.id, actor: "human" });
+    assert.equal(resumed.status, "pending_review");
+    await assert.rejects(() => resumeExperienceReceiptDraft(vault, { draftId: draft.id, actor: "human" }), /only a deferred/);
   });
 });
 

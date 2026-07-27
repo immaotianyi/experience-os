@@ -4,10 +4,12 @@ import { useTheme } from "./hooks/useTheme.js";
 import {
   IconOverview, IconReview, IconWall, IconSkills, IconAudit,
   IconVault, IconMarket, IconQuality, IconRevenue, IconProject,
-  IconRefresh, IconClose, IconSun, IconMoon
+  IconRefresh, IconClose, IconSun, IconMoon, IconFeedback
 } from "./components/icons.jsx";
+import AttentionBeacon from "./components/AttentionBeacon.jsx";
 import ProjectView from "./views/ProjectView.jsx";
 import DetailDrawer from "./components/DetailDrawer.jsx";
+import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import OverviewView from "./views/OverviewView.jsx";
 import ReviewView from "./views/ReviewView.jsx";
 import WallHitsView from "./views/WallHitsView.jsx";
@@ -17,19 +19,36 @@ import VaultView from "./views/VaultView.jsx";
 import MarketplaceView from "./views/MarketplaceView.jsx";
 import QualityView from "./views/QualityView.jsx";
 import SellerRevenueView from "./views/SellerRevenueView.jsx";
+import BetaFeedbackView from "./views/BetaFeedbackView.jsx";
 
-const VIEWS = [
-  { id: "project", label: "项目", icon: IconProject, key: "1" },
-  { id: "overview", label: "总览", icon: IconOverview, key: "2" },
-  { id: "marketplace", label: "市场", icon: IconMarket, key: "3" },
-  { id: "quality", label: "质量看板", icon: IconQuality, key: "4" },
-  { id: "revenue", label: "卖家营收", icon: IconRevenue, key: "5" },
-  { id: "review", label: "审查包", icon: IconReview, key: "6" },
-  { id: "wallhits", label: "撞墙", icon: IconWall, key: "7" },
-  { id: "skills", label: "Skill 库", icon: IconSkills, key: "8" },
-  { id: "audit", label: "决策审计", icon: IconAudit, key: "9" },
-  { id: "vault", label: "Vault", icon: IconVault, key: "0" }
+const RAIL_GROUPS = [
+  { label: "主线", items: [
+    { id: "project", label: "项目", icon: IconProject, key: "1" },
+    { id: "overview", label: "总览", icon: IconOverview, key: "2" },
+  ]},
+  { label: "管道", items: [
+    { id: "review", label: "审查包", icon: IconReview, key: "6" },
+    { id: "wallhits", label: "撞墙", icon: IconWall, key: "7" },
+    { id: "skills", label: "Skill 库", icon: IconSkills, key: "8" },
+  ]},
+  { label: "交易", items: [
+    { id: "marketplace", label: "市场", icon: IconMarket, key: "3" },
+    { id: "quality", label: "质量看板", icon: IconQuality, key: "4" },
+    { id: "revenue", label: "卖家营收", icon: IconRevenue, key: "5" },
+  ]},
+  { label: "治理", items: [
+    { id: "audit", label: "决策审计", icon: IconAudit, key: "9" },
+    { id: "vault", label: "Vault", icon: IconVault, key: "0" },
+    { id: "feedback", label: "Beta 反馈", icon: IconFeedback, key: "f" },
+  ]},
 ];
+
+const VIEWS = RAIL_GROUPS.flatMap((g) => g.items);
+
+function viewFromLocation() {
+  const candidate = new URLSearchParams(window.location.search).get("view");
+  return VIEWS.some((view) => view.id === candidate) ? candidate : "project";
+}
 
 const VIEW_TITLES = {
   project: { eyebrow: "Experience OS 3.0", title: "项目" },
@@ -41,11 +60,12 @@ const VIEW_TITLES = {
   wallhits: { eyebrow: "生产管道", title: "撞墙记录" },
   skills: { eyebrow: "生产管道", title: "Skill 库" },
   audit: { eyebrow: "治理", title: "决策审计" },
-  vault: { eyebrow: "治理", title: "Vault 维护" }
+  vault: { eyebrow: "治理", title: "Vault 维护" },
+  feedback: { eyebrow: "Beta", title: "Beta 反馈" }
 };
 
 function Workbench() {
-  const [activeView, setActiveView] = useState("project");
+  const [activeView, setActiveView] = useState(viewFromLocation);
   const [drawerContent, setDrawerContent] = useState(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const { theme, toggle } = useTheme();
@@ -61,20 +81,39 @@ function Workbench() {
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e) => {
-      if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
+      if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT" || e.target.isContentEditable) return;
+      if (e.key === "Escape") { closeDrawer(); return; }
+      // Disable view-switching shortcuts when drawer is open
+      if (drawerContent) return;
       const view = VIEWS.find((v) => v.key === e.key);
       if (view) {
         setActiveView(view.id);
         return;
       }
       if (e.key === "r" || e.key === "R") refresh();
-      if (e.key === "Escape") closeDrawer();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [refresh, closeDrawer]);
+  }, [refresh, closeDrawer, drawerContent]);
+
+  // Sync activeView with browser back/forward
+  useEffect(() => {
+    const onPop = () => setActiveView(viewFromLocation());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   const meta = VIEW_TITLES[activeView] || { eyebrow: "", title: "" };
+
+  const navigateFromAttention = useCallback((view, anchor = null) => {
+    setActiveView(view);
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", view);
+    window.history.replaceState(null, "", url);
+    if (anchor) {
+      window.setTimeout(() => { window.location.hash = anchor; }, 0);
+    }
+  }, []);
 
   const renderView = () => {
     const props = { openDrawer, refreshKey, toast };
@@ -89,29 +128,40 @@ function Workbench() {
       case "skills": return <SkillsView {...props} />;
       case "audit": return <AuditView {...props} />;
       case "vault": return <VaultView {...props} />;
+      case "feedback": return <BetaFeedbackView {...props} />;
       default: return null;
     }
   };
 
   return (
     <>
-      <nav className="rail">
+      <nav className="rail" aria-label="主导航">
         <div className="mark">EOS</div>
-        {VIEWS.map((v) => {
-          const Icon = v.icon;
-          return (
-            <button
-              key={v.id}
-              className={`rail-item ${activeView === v.id ? "active" : ""}`}
-              onClick={() => setActiveView(v.id)}
-              title={`${v.label} (${v.key})`}
-              aria-label={v.label}
-              aria-current={activeView === v.id ? "page" : undefined}
-            >
-              <Icon />
-            </button>
-          );
-        })}
+        {RAIL_GROUPS.map((group) => (
+          <div key={group.label} className="rail-group">
+            <span className="rail-group-label">{group.label}</span>
+            {group.items.map((v) => {
+              const Icon = v.icon;
+              return (
+                <button
+                  key={v.id}
+                  className={`rail-item ${activeView === v.id ? "active" : ""}`}
+                  onClick={() => {
+                    setActiveView(v.id);
+                    const u = new URL(window.location.href);
+                    u.searchParams.set("view", v.id);
+                    window.history.pushState(null, "", u);
+                  }}
+                  title={`${v.label} (${v.key})`}
+                  aria-label={v.label}
+                  aria-current={activeView === v.id ? "page" : undefined}
+                >
+                  <Icon />
+                </button>
+              );
+            })}
+          </div>
+        ))}
       </nav>
 
       <main className="shell">
@@ -134,6 +184,7 @@ function Workbench() {
       </main>
 
       <DetailDrawer content={drawerContent} onClose={closeDrawer} />
+      <AttentionBeacon refreshKey={refreshKey} onNavigate={navigateFromAttention} />
     </>
   );
 }
@@ -141,7 +192,9 @@ function Workbench() {
 export default function App() {
   return (
     <ToastProvider>
-      <Workbench />
+      <ErrorBoundary>
+        <Workbench />
+      </ErrorBoundary>
     </ToastProvider>
   );
 }

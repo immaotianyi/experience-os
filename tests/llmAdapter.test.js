@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 
 import {
   MockLLMAdapter,
+  DeepSeekLLMAdapter,
   createLLMAdapter,
   PROMPT_TEMPLATES,
   fillTemplate,
@@ -85,6 +86,8 @@ describe("createLLMAdapter factory", () => {
 
     const llm = createLLMAdapter();
     assert.equal(llm.name, "mock");
+    assert.equal(llm.mode, "rehearsal");
+    assert.match(llm.fallbackReason, /No live LLM provider/);
 
     if (originalOpenAI) process.env.OPENAI_API_KEY = originalOpenAI;
     if (originalAnthropic) process.env.ANTHROPIC_API_KEY = originalAnthropic;
@@ -94,6 +97,21 @@ describe("createLLMAdapter factory", () => {
   it("returns MockLLMAdapter when provider is mock", () => {
     const llm = createLLMAdapter({ provider: "mock" });
     assert.equal(llm.name, "mock");
+  });
+
+  it("creates an explicitly identified DeepSeek adapter", () => {
+    const llm = createLLMAdapter({ provider: "deepseek", apiKey: "test-key" });
+    assert.ok(llm instanceof DeepSeekLLMAdapter);
+    assert.equal(llm.name, "deepseek");
+    assert.equal(llm.defaultModel, "deepseek-v4-flash");
+    assert.equal(llm.baseURL, "https://api.deepseek.com/v1");
+  });
+
+  it("keeps an explicit configuration failure observable when falling back", () => {
+    const llm = createLLMAdapter({ provider: "openai", apiKey: "" });
+    assert.equal(llm.name, "mock");
+    assert.equal(llm.mode, "rehearsal");
+    assert.match(llm.fallbackReason, /OpenAI initialization failed/);
   });
 });
 

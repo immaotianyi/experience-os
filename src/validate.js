@@ -115,6 +115,9 @@ export function validateConversationEvent(event) {
   if (event?.consented !== undefined && typeof event.consented !== "boolean") {
     issues.push("conversationEvent.consented must be boolean when present");
   }
+  if (event?.capturePermitId !== null && event?.capturePermitId !== undefined && !hasString(event.capturePermitId)) {
+    issues.push("conversationEvent.capturePermitId must be a non-empty string when present");
+  }
   return issues;
 }
 
@@ -126,6 +129,9 @@ export function validateWorkCheckpoint(checkpoint) {
   if (!hasString(checkpoint?.eventId)) issues.push("workCheckpoint.eventId is required");
   if (!hasString(checkpoint?.evidenceLinkId)) issues.push("workCheckpoint.evidenceLinkId is required");
   if (checkpoint?.status !== "captured") issues.push("workCheckpoint.status must be captured");
+  if (checkpoint?.capturePermitId !== null && checkpoint?.capturePermitId !== undefined && !hasString(checkpoint.capturePermitId)) {
+    issues.push("workCheckpoint.capturePermitId must be a non-empty string when present");
+  }
   return issues;
 }
 
@@ -324,6 +330,35 @@ export function validateReuseContext(context) {
   return issues;
 }
 
+export function validateExperienceReuseTrial(trial) {
+  const issues = [];
+  if (!hasString(trial?.id)) issues.push("experienceReuseTrial.id is required");
+  if (!hasString(trial?.projectId)) issues.push("experienceReuseTrial.projectId is required");
+  if (!hasString(trial?.assetId)) issues.push("experienceReuseTrial.assetId is required");
+  if (!hasString(trial?.sourceProjectId)) issues.push("experienceReuseTrial.sourceProjectId is required");
+  if (!hasString(trial?.taskTitle)) issues.push("experienceReuseTrial.taskTitle is required");
+  if (trial?.decision !== "adopted") issues.push("experienceReuseTrial.decision must be adopted");
+  if (trial?.outcome !== null && trial?.outcome !== undefined && !["success", "partial", "failure"].includes(trial.outcome)) {
+    issues.push("experienceReuseTrial.outcome must be success, partial, failure, or null");
+  }
+  if (trial?.reducedRepeatedDecision !== null && trial?.reducedRepeatedDecision !== undefined && typeof trial.reducedRepeatedDecision !== "boolean") {
+    issues.push("experienceReuseTrial.reducedRepeatedDecision must be boolean or null");
+  }
+  return issues;
+}
+
+export function validateBetaFeedback(feedback) {
+  const issues = [];
+  if (!hasString(feedback?.id)) issues.push("betaFeedback.id is required");
+  if (!hasString(feedback?.participantId)) issues.push("betaFeedback.participantId is required");
+  if (!isOneOf(feedback?.stage, ["first_impression", "after_trying", "blocked"])) issues.push("betaFeedback.stage is invalid");
+  if (!Number.isInteger(feedback?.usefulness) || feedback.usefulness < 1 || feedback.usefulness > 5) issues.push("betaFeedback.usefulness must be 1 through 5");
+  if (!Number.isInteger(feedback?.clarity) || feedback.clarity < 1 || feedback.clarity > 5) issues.push("betaFeedback.clarity must be 1 through 5");
+  if (!isOneOf(feedback?.wouldUseAgain, ["yes", "no", "unsure"])) issues.push("betaFeedback.wouldUseAgain is invalid");
+  if (!hasOptionalString(feedback?.contact)) issues.push("betaFeedback.contact must be null or string");
+  return issues;
+}
+
 export function validateSelfIterationRun(run) {
   const issues = [];
   if (!hasString(run?.id)) issues.push("selfIterationRun.id is required");
@@ -451,6 +486,9 @@ export function validateEvidenceLink(link) {
   if (!hasString(link?.title)) issues.push("evidenceLink.title is required");
   if (!hasString(link?.source)) issues.push("evidenceLink.source is required");
   if (!hasString(link?.capturedAt)) issues.push("evidenceLink.capturedAt is required");
+  if (link?.capturePermitId !== null && link?.capturePermitId !== undefined && !hasString(link.capturePermitId)) {
+    issues.push("evidenceLink.capturePermitId must be a non-empty string when present");
+  }
   if (link?.uncertainty !== null && link?.uncertainty !== undefined) {
     if (!hasNumber(link.uncertainty) || link.uncertainty < 0 || link.uncertainty > 1) {
       issues.push("evidenceLink.uncertainty must be between 0 and 1 (or null)");
@@ -496,7 +534,9 @@ export function validateExperienceReceiptDraft(draft) {
   if (!hasString(draft?.summary)) issues.push("experienceReceiptDraft.summary is required");
   if (!isOneOf(draft?.outcome, OUTCOME_STATES)) issues.push(`experienceReceiptDraft.outcome must be one of: ${OUTCOME_STATES.join(", ")}`);
   if (draft?.uncertainty !== null && draft?.uncertainty !== undefined && (!hasNumber(draft.uncertainty) || draft.uncertainty < 0 || draft.uncertainty > 1)) issues.push("experienceReceiptDraft.uncertainty must be between 0 and 1 (or null)");
+  if (draft?.generationWarnings !== undefined && !hasArray(draft.generationWarnings)) issues.push("experienceReceiptDraft.generationWarnings must be an array when present");
   if (!isObject(draft?.generatedBy) || !hasString(draft.generatedBy.provider) || !hasString(draft.generatedBy.model)) issues.push("experienceReceiptDraft.generatedBy must contain provider and model");
+  if (draft?.generatedBy?.mode !== undefined && !isOneOf(draft.generatedBy.mode, ["live", "rehearsal", "agent_hosted"])) issues.push("experienceReceiptDraft.generatedBy.mode must be live, rehearsal, or agent_hosted");
   if (!isOneOf(draft?.status, EXPERIENCE_RECEIPT_DRAFT_STATUSES)) issues.push(`experienceReceiptDraft.status must be one of: ${EXPERIENCE_RECEIPT_DRAFT_STATUSES.join(", ")}`);
   return issues;
 }
@@ -560,6 +600,8 @@ export function validateRecord(record) {
     DecisionReceipt: validateDecisionReceipt,
     OutcomeRecord: validateOutcomeRecord,
     ExperienceAsset: validateExperienceAsset,
+    ExperienceReuseTrial: validateExperienceReuseTrial,
+    BetaFeedback: validateBetaFeedback,
     WorkCheckpoint: validateWorkCheckpoint
   };
   const validator = validators[record.kind];
@@ -594,6 +636,8 @@ export async function validateVault(vault) {
     "DecisionReceipt",
     "OutcomeRecord",
     "ExperienceAsset",
+    "ExperienceReuseTrial",
+    "BetaFeedback",
     "WorkCheckpoint"
   ];
   const supportedKindSet = new Set(supportedKinds);

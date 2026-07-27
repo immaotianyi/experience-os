@@ -1,9 +1,15 @@
 import { createReviewDecision, createReviewPacket, createWallHit } from "./domain.js";
 import { slug, latest } from "./utils.js";
+import { randomBytes } from "node:crypto";
+
+/** Short random hex suffix to prevent same-millisecond ID collisions. */
+function nonce(len = 4) {
+  return randomBytes(len).toString("hex");
+}
 
 function reviewPacketForPreference({ projectId, preference }) {
   return createReviewPacket({
-    id: `review_packet.${slug(projectId)}.${slug(preference.id)}.${Date.now()}`,
+    id: `review_packet.${slug(projectId)}.${slug(preference.id)}.${Date.now()}.${nonce()}`,
     projectId,
     targetKind: "PreferenceHypothesis",
     targetId: preference.id,
@@ -41,7 +47,7 @@ function reviewPacketForSkill({ projectId, skill }) {
   const isStrategic = skill.skillLevel === "strategic";
 
   return createReviewPacket({
-    id: `review_packet.${slug(projectId)}.${slug(skill.id)}.${Date.now()}`,
+    id: `review_packet.${slug(projectId)}.${slug(skill.id)}.${Date.now()}.${nonce()}`,
     projectId,
     targetKind: "Skill",
     targetId: skill.id,
@@ -96,8 +102,15 @@ export async function buildHumanReviewPackets({ vault, projectId = "project.expe
 
   const reviewTargets = [...preferenceTargets, ...skillTargets].slice(0, limit);
 
-  for (const packet of reviewTargets) {
-    await vault.save(packet);
+  const doSave = async () => {
+    for (const packet of reviewTargets) {
+      await vault.save(packet);
+    }
+  };
+  if (typeof vault.withTransaction === "function") {
+    await vault.withTransaction(doSave, { message: `[Review] build packets: ${projectId}` });
+  } else {
+    await doSave();
   }
   return reviewTargets;
 }
@@ -117,7 +130,7 @@ export async function applyReviewDecision({ vault, packet, decision = packet.def
 
   const resultingStatus = statusForDecision(packet, decision);
   const reviewDecision = createReviewDecision({
-    id: `review_decision.${slug(packet.projectId)}.${slug(packet.targetKind)}.${slug(packet.targetId)}.${slug(decision)}.${Date.now()}`,
+    id: `review_decision.${slug(packet.projectId)}.${slug(packet.targetKind)}.${slug(packet.targetId)}.${slug(decision)}.${Date.now()}.${nonce()}`,
     projectId: packet.projectId,
     reviewPacketId: packet.id,
     targetKind: packet.targetKind,
@@ -130,23 +143,33 @@ export async function applyReviewDecision({ vault, packet, decision = packet.def
   const decidedAt = new Date().toISOString();
   const targetUpdate = await prepareDecisionTargetUpdate({ vault, packet, reviewDecision, resultingStatus, decidedAt });
 
-  // Persist side-effects: a missing target still produces a WallHit, and a
-  // present target produces an updated record. Either way the ReviewDecision
-  // must be persisted and the packet closed — otherwise the decision vanishes
-  // from the audit trail and the packet lingers in "pending" forever, which
-  // also defeats the idempotency guard in buildHumanReviewPackets.
-  if (targetUpdate?.wallHit) {
-    await vault.save(targetUpdate.wallHit);
+  // Persist all side-effects atomically — if any save fails, the transaction
+  // rolls back so the packet does not get stuck in a half-decided state.
+  // CRITICAL: reload packet inside the transaction to prevent TOCTOU double-decision.
+  const doPersist = async () => {
+    const freshPacket = await vault.load("ReviewPacket", packet.id);
+    if (freshPacket.status === "decided") {
+      throw new Error(`ReviewPacket ${packet.id} was already decided by another request`);
+    }
+    if (targetUpdate?.wallHit) {
+      await vault.save(targetUpdate.wallHit);
+    }
+    if (targetUpdate?.record) {
+      await vault.save(targetUpdate.record);
+    }
+    await vault.save({
+      ...freshPacket,
+      status: "decided",
+      updatedAt: decidedAt
+    });
+    await vault.save(reviewDecision);
+  };
+
+  if (typeof vault.withTransaction === "function") {
+    await vault.withTransaction(doPersist, { message: `[Review] decide: ${packet.id}` });
+  } else {
+    await doPersist();
   }
-  if (targetUpdate?.record) {
-    await vault.save(targetUpdate.record);
-  }
-  await vault.save({
-    ...packet,
-    status: "decided",
-    updatedAt: decidedAt
-  });
-  await vault.save(reviewDecision);
 
   if (targetUpdate?.wallHit) {
     return {
@@ -167,7 +190,7 @@ async function prepareDecisionTargetUpdate({ vault, packet, reviewDecision, resu
   } catch (error) {
     return {
       wallHit: createWallHit({
-        id: `wallhit.${slug(packet.projectId)}.${slug(packet.targetKind)}.${slug(packet.targetId)}.target_missing.${Date.now()}`,
+        id: `wallhit.${slug(packet.projectId)}.${slug(packet.targetKind)}.${slug(packet.targetId)}.target_missing.${Date.now()}.${nonce()}`,
         projectId: packet.projectId,
         wallType: "target_missing",
         stage: "human_review_decision",
@@ -181,6 +204,28 @@ async function prepareDecisionTargetUpdate({ vault, packet, reviewDecision, resu
           "确认目标资产是否被清理或迁移",
           "重新生成 ReviewPacket",
           "为 Vault 清理策略增加引用完整性检查"
+        ]
+      })
+    };
+  }
+
+  // vault.load returns null for missing files — treat same as load error
+  if (!target) {
+    return {
+      wallHit: createWallHit({
+        id: `wallhit.${slug(packet.projectId)}.${slug(packet.targetKind)}.${slug(packet.targetId)}.target_null.${Date.now()}.${nonce()}`,
+        projectId: packet.projectId,
+        wallType: "target_missing",
+        stage: "human_review_decision",
+        message: "Human Review 决策无法回写目标资产，因为目标记录为空。",
+        blockedBy: [
+          `targetKind=${packet.targetKind}`,
+          `targetId=${packet.targetId}`,
+          "vault.load returned null"
+        ],
+        suggestedFixes: [
+          "确认目标资产是否被清理或迁移",
+          "重新生成 ReviewPacket"
         ]
       })
     };
@@ -253,5 +298,5 @@ function statusForDecision(packet, decision) {
     if (decision === "approve_candidate") return "candidate_confirmed";
     throw new Error(`Unknown Skill review decision: ${decision}`);
   }
-  return "reviewed";
+  throw new Error(`Unsupported targetKind for review decision: ${packet.targetKind}`);
 }

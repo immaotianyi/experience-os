@@ -1,0 +1,13 @@
+.git
+.DS_Store
+.env
+node_modules
+apps/web-react/node_modules
+apps/macos/EOSMenuBar/.build
+work/vaults
+work/fixtures
+work/vault-archive
+work/experiments
+dist
+*.log
+

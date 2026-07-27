@@ -20,6 +20,8 @@ import {
   TRIAL_LIMIT
 } from "./pricingEngine.js";
 import { slug } from "./utils.js";
+import { randomBytes } from "node:crypto";
+const nonce = (n = 4) => randomBytes(n).toString("hex");
 
 /**
  * Process a full purchase for a listing.
@@ -83,7 +85,7 @@ export async function processPurchase(vault, { listingId, buyerId, purchaseType 
       buyerId
     });
 
-    const id = `transaction.${slug(listingId)}.${slug(buyerId)}.${Date.now()}`;
+    const id = `transaction.${slug(listingId)}.${slug(buyerId)}.${Date.now()}.${nonce()}`;
     const transaction = createTransaction({
       id,
       projectId: listing.projectId,
@@ -123,6 +125,9 @@ export async function processPurchase(vault, { listingId, buyerId, purchaseType 
     };
   };
 
+  if (typeof vault.withTransaction === "function") {
+    return vault.withTransaction(doPurchase, { message: `[Transaction] purchase: ${listingId}` });
+  }
   if (typeof vault.withWriteLock === "function") {
     return vault.withWriteLock(doPurchase);
   }
@@ -181,6 +186,9 @@ export async function refundTransaction(vault, transactionId) {
     return transaction;
   };
 
+  if (typeof vault.withTransaction === "function") {
+    return vault.withTransaction(doRefund, { message: `[Transaction] refund: ${transactionId}` });
+  }
   if (typeof vault.withWriteLock === "function") {
     return vault.withWriteLock(doRefund);
   }

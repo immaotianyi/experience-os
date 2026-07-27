@@ -13,7 +13,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile, readFile, access, rm, stat } from "node:fs/promises";
+import { mkdir, writeFile, readFile, access, rm, stat, rename } from "node:fs/promises";
 import path from "node:path";
 import { Vault } from "./vault.js";
 
@@ -59,6 +59,7 @@ export class GitVault {
     this.vault = new Vault(rootDir);
     this.gitEnabled = false;
     this.writeLockDepth = 0;
+    this.transaction = null;
   }
 
   async init() {
@@ -163,10 +164,18 @@ export class GitVault {
   }
 
   async saveUnlocked(record) {
-    const filePath = await this.vault.save(record);
+    const filePath = this.vault.fileFor(record);
+    if (this.transaction) {
+      await this.snapshotTransactionFile(filePath);
+      const savedPath = await this.vault.save(record);
+      this.transaction.changedPaths.add(savedPath);
+      return savedPath;
+    }
+
+    const savedPath = await this.vault.save(record);
 
     if (this.gitEnabled) {
-      const relPath = path.relative(this.rootDir, filePath);
+      const relPath = path.relative(this.rootDir, savedPath);
       const op = record.createdAt === record.updatedAt ? "create" : "update";
       const message = `[${record.kind}] ${op}: ${record.id}`;
       try {
@@ -177,7 +186,76 @@ export class GitVault {
       }
     }
 
-    return filePath;
+    return savedPath;
+  }
+
+  /**
+   * Run a multi-record change under the existing cross-process write lock.
+   * Files are snapshotted before their first mutation; a failed callback restores
+   * them and leaves no Git commit. A successful callback becomes one commit.
+   */
+  async withTransaction(work, { message = "[Vault] transaction" } = {}) {
+    if (typeof work !== "function") throw new Error("withTransaction requires a function");
+    if (this.transaction) return work();
+
+    return this.withWriteLock(async () => {
+      this.transaction = { snapshots: new Map(), changedPaths: new Set() };
+      try {
+        const result = await work();
+        await this.commitTransaction(message);
+        return result;
+      } catch (error) {
+        await this.rollbackTransaction();
+        throw error;
+      } finally {
+        this.transaction = null;
+      }
+    });
+  }
+
+  async snapshotTransactionFile(filePath) {
+    if (this.transaction.snapshots.has(filePath)) return;
+    try {
+      this.transaction.snapshots.set(filePath, await readFile(filePath));
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        this.transaction.snapshots.set(filePath, null);
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async rollbackTransaction() {
+    const snapshots = [...this.transaction.snapshots.entries()].reverse();
+    for (const [filePath, original] of snapshots) {
+      if (original === null) {
+        await rm(filePath, { force: true });
+        continue;
+      }
+      await mkdir(path.dirname(filePath), { recursive: true });
+      const tempPath = `${filePath}.rollback-${process.pid}-${Date.now()}`;
+      await writeFile(tempPath, original);
+      await rename(tempPath, filePath);
+    }
+  }
+
+  async commitTransaction(message) {
+    if (!this.gitEnabled || this.transaction.changedPaths.size === 0) return;
+    const relPaths = [...this.transaction.changedPaths]
+      .map((filePath) => path.relative(this.rootDir, filePath));
+    try {
+      git(["add", ...relPaths], this.rootDir);
+      git(["commit", "--no-gpg-sign", "-m", message], this.rootDir);
+    } catch (error) {
+      // Only ignore "nothing to commit" (exit code 1 with that message); other errors are real
+      const msg = String(error?.stderr || error?.message || "");
+      if (/nothing to commit|no changes added to commit|nothing added to commit/i.test(msg)) {
+        return; // Expected when transaction content is identical to HEAD
+      }
+      // Real git errors should not be silently swallowed
+      console.error(`[GitVault] commit failed: ${msg}`);
+    }
   }
 
   async load(kind, id) {
@@ -365,6 +443,8 @@ const COLLECTION_DIRS = {
   DecisionReceipt: "decision-receipts",
   OutcomeRecord: "outcome-records",
   ExperienceAsset: "experience-assets",
+  ExperienceReuseTrial: "experience-reuse-trials",
+  BetaFeedback: "beta-feedback",
   WorkCheckpoint: "work-checkpoints"
 };
 

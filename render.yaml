@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: experience-os-private-beta
+    runtime: docker
+    healthCheckPath: /api/health
+    envVars:
+      - key: EOS_DEPLOYMENT_MODE
+        value: private_beta
+      - key: EOS_VAULT_DIR
+        value: /var/data/vault
+      - key: EOS_VAULT_ARCHIVE_DIR
+        value: /var/data/vault-archive
+      - key: EOS_ALLOW_MOCK_DRAFTS
+        value: "0"
+    disk:
+      name: eos-private-beta-data
+      mountPath: /var/data
+      sizeGB: 1

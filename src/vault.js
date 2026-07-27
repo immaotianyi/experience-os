@@ -28,6 +28,8 @@ const COLLECTION_DIR = Object.freeze({
   DecisionReceipt: "decision-receipts",
   OutcomeRecord: "outcome-records",
   ExperienceAsset: "experience-assets",
+  ExperienceReuseTrial: "experience-reuse-trials",
+  BetaFeedback: "beta-feedback",
   WorkCheckpoint: "work-checkpoints"
 });
 

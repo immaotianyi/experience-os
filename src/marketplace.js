@@ -14,6 +14,8 @@
 import { createMarketplaceListing } from "./domain.js";
 import { validatePricing, validateLicenseType } from "./pricingEngine.js";
 import { slug } from "./utils.js";
+import { randomBytes } from "node:crypto";
+const nonce = (n = 4) => randomBytes(n).toString("hex");
 
 /**
  * Publish a stable Skill to the marketplace.
@@ -71,7 +73,7 @@ export async function publishSkill(vault, {
       throw new Error(`Skill ${skillId} already has an active listing: ${priorActive.id}. Unpublish or bump version first.`);
     }
 
-    const id = `marketplace_listing.${slug(skillId)}.${slug(version)}.${Date.now()}`;
+    const id = `marketplace_listing.${slug(skillId)}.${slug(version)}.${Date.now()}.${nonce()}`;
     const listing = createMarketplaceListing({
       id,
       projectId: skill.projectId,
@@ -106,14 +108,21 @@ export async function unpublishSkill(vault, listingId) {
   if (!listingId || typeof listingId !== "string") {
     throw new Error("listingId is required");
   }
-  const listing = await vault.load("MarketplaceListing", listingId).catch(() => null);
-  if (!listing) {
-    throw new Error(`Listing not found: ${listingId}`);
-  }
-  listing.status = "unpublished";
-  listing.updatedAt = new Date().toISOString();
-  await vault.save(listing);
-  return listing;
+  const doUnpublish = async () => {
+    const listing = await vault.load("MarketplaceListing", listingId).catch(() => null);
+    if (!listing) {
+      throw new Error(`Listing not found: ${listingId}`);
+    }
+    if (listing.status === "suspended") {
+      throw new Error("cannot unpublish a suspended listing");
+    }
+    listing.status = "unpublished";
+    listing.updatedAt = new Date().toISOString();
+    await vault.save(listing);
+    return listing;
+  };
+  if (typeof vault.withWriteLock === "function") return vault.withWriteLock(doUnpublish);
+  return doUnpublish();
 }
 
 /**
@@ -123,14 +132,18 @@ export async function suspendListing(vault, listingId) {
   if (!listingId || typeof listingId !== "string") {
     throw new Error("listingId is required");
   }
-  const listing = await vault.load("MarketplaceListing", listingId).catch(() => null);
-  if (!listing) {
-    throw new Error(`Listing not found: ${listingId}`);
-  }
-  listing.status = "suspended";
-  listing.updatedAt = new Date().toISOString();
-  await vault.save(listing);
-  return listing;
+  const doSuspend = async () => {
+    const listing = await vault.load("MarketplaceListing", listingId).catch(() => null);
+    if (!listing) {
+      throw new Error(`Listing not found: ${listingId}`);
+    }
+    listing.status = "suspended";
+    listing.updatedAt = new Date().toISOString();
+    await vault.save(listing);
+    return listing;
+  };
+  if (typeof vault.withWriteLock === "function") return vault.withWriteLock(doSuspend);
+  return doSuspend();
 }
 
 /**
@@ -271,17 +284,21 @@ export async function recordDownload(vault, listingId) {
   if (!listingId || typeof listingId !== "string") {
     throw new Error("listingId is required");
   }
-  const listing = await vault.load("MarketplaceListing", listingId).catch(() => null);
-  if (!listing) {
-    throw new Error(`Listing not found: ${listingId}`);
-  }
-  if (listing.status !== "active") {
-    throw new Error(`Cannot download listing with status: ${listing.status}`);
-  }
-  listing.downloads = (listing.downloads || 0) + 1;
-  listing.updatedAt = new Date().toISOString();
-  await vault.save(listing);
-  return listing;
+  const doDownload = async () => {
+    const listing = await vault.load("MarketplaceListing", listingId).catch(() => null);
+    if (!listing) {
+      throw new Error(`Listing not found: ${listingId}`);
+    }
+    if (listing.status !== "active") {
+      throw new Error(`Cannot download listing with status: ${listing.status}`);
+    }
+    listing.downloads = (listing.downloads || 0) + 1;
+    listing.updatedAt = new Date().toISOString();
+    await vault.save(listing);
+    return listing;
+  };
+  if (typeof vault.withWriteLock === "function") return vault.withWriteLock(doDownload);
+  return doDownload();
 }
 
 /**

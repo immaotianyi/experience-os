@@ -5,3 +5,6 @@ work/vault-archive/
 .env
 *.log
 .DS_Store
+dist/
+apps/macos/EOSMenuBar/.build/
+work/experiments/*/​.eos/vault

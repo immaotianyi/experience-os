@@ -103,6 +103,7 @@ export const EXPERIENCE_ASSET_STATUSES = Object.freeze([
 
 export const EXPERIENCE_RECEIPT_DRAFT_STATUSES = Object.freeze([
   "pending_review",
+  "deferred",
   "accepted",
   "rejected"
 ]);
@@ -167,7 +168,8 @@ export function createEvidenceLink({
   applicabilityBounds = [],  // explicit scope limits
   tags = [],
   origin = "human",
-  actor = "human"
+  actor = "human",
+  capturePermitId = null
 }) {
   return {
     id,
@@ -185,6 +187,7 @@ export function createEvidenceLink({
     tags,
     origin,
     actor,
+    capturePermitId,
     createdAt: nowIso(),
     updatedAt: nowIso()
   };
@@ -253,6 +256,7 @@ export function createExperienceReceiptDraft({
   counterexamples = [],
   applicabilityBounds = [],
   lessonsLearned = [],
+  generationWarnings = [],
   generatedBy,
   status = "pending_review",
   createdAt = null
@@ -270,6 +274,7 @@ export function createExperienceReceiptDraft({
     counterexamples,
     applicabilityBounds,
     lessonsLearned,
+    generationWarnings,
     generatedBy,
     status,
     createdAt: createdAt ?? nowIso(),
@@ -359,7 +364,7 @@ export function createOutcomeRecord({
   };
 }
 
-export function createConversationEvent({ id, projectId, actor, content, sourceTool = "manual", sourceRef = null, consented = true }) {
+export function createConversationEvent({ id, projectId, actor, content, sourceTool = "manual", sourceRef = null, consented = true, capturePermitId = null }) {
   return {
     id,
     kind: "ConversationEvent",
@@ -369,12 +374,13 @@ export function createConversationEvent({ id, projectId, actor, content, sourceT
     sourceTool,
     sourceRef,
     consented,
+    capturePermitId,
     createdAt: nowIso()
   };
 }
 
 /** A user-marked, local work boundary that groups raw collaboration and evidence. */
-export function createWorkCheckpoint({ id, projectId, title, eventId, evidenceLinkId, notes = "", createdAt = null }) {
+export function createWorkCheckpoint({ id, projectId, title, eventId, evidenceLinkId, notes = "", capturePermitId = null, createdAt = null }) {
   return {
     id,
     kind: "WorkCheckpoint",
@@ -383,6 +389,7 @@ export function createWorkCheckpoint({ id, projectId, title, eventId, evidenceLi
     eventId,
     evidenceLinkId,
     notes,
+    capturePermitId,
     status: "captured",
     createdAt: createdAt ?? nowIso(),
     updatedAt: nowIso()
@@ -414,6 +421,28 @@ export function createExperienceAsset({
     title,
     status,
     approvedBy,
+    createdAt: createdAt ?? nowIso(),
+    updatedAt: nowIso()
+  };
+}
+
+/** A bounded, human-owned test of whether an approved experience helped in a new project. */
+export function createExperienceReuseTrial({
+  id, projectId, assetId, sourceProjectId, taskTitle, decisionNote = "", createdAt = null
+}) {
+  return {
+    id,
+    kind: "ExperienceReuseTrial",
+    projectId,
+    assetId,
+    sourceProjectId,
+    taskTitle,
+    decision: "adopted",
+    decisionNote,
+    outcome: null,
+    outcomeNote: "",
+    reducedRepeatedDecision: null,
+    completedAt: null,
     createdAt: createdAt ?? nowIso(),
     updatedAt: nowIso()
   };
@@ -884,6 +913,24 @@ export function createSkillRating({
     userId,
     score,
     review,
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  };
+}
+
+/** A voluntary product-level Beta report. Never contains captured collaboration. */
+export function createBetaFeedback({ id, participantId, stage, usefulness, clarity, wouldUseAgain, helped = "", blocked = "", contact = null }) {
+  return {
+    id,
+    kind: "BetaFeedback",
+    participantId,
+    stage,
+    usefulness,
+    clarity,
+    wouldUseAgain,
+    helped,
+    blocked,
+    contact,
     createdAt: nowIso(),
     updatedAt: nowIso()
   };

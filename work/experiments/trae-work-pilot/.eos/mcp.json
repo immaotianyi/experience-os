@@ -6,7 +6,8 @@
         "/Users/sanzhaibanniang/Documents/Codex/2026-07-16/gemini-3-1-pro/src/eosRelayMcp.js"
       ],
       "env": {
-        "EOS_VAULT_DIR": "/Users/sanzhaibanniang/Documents/Codex/2026-07-16/gemini-3-1-pro/work/experiments/trae-work-pilot/.eos/vault"
+        "EOS_VAULT_DIR": "/Users/sanzhaibanniang/Documents/Codex/2026-07-16/gemini-3-1-pro/work/experiments/trae-work-pilot/.eos/vault",
+        "EOS_CAPTURE_POLICY": "strict_permit"
       }
     }
   }

@@ -18,6 +18,8 @@
 
 import { createSkillRating } from "./domain.js";
 import { slug } from "./utils.js";
+import { randomBytes } from "node:crypto";
+const nonce = (n = 4) => randomBytes(n).toString("hex");
 import { syncListingRatings } from "./marketplace.js";
 
 const TRIAL_RATING_WEIGHT = 0.5;
@@ -66,7 +68,7 @@ export async function submitRating(vault, { skillId, userId, score, review = "",
       return prior;
     }
 
-    const id = `rating.${slug(skillId)}.${slug(userId)}.${Date.now()}`;
+    const id = `rating.${slug(skillId)}.${slug(userId)}.${Date.now()}.${nonce()}`;
     const rating = createSkillRating({ id, projectId, skillId, userId, score, review });
     await vault.save(rating);
     await syncListingRatings(vault, skillId);

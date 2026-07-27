@@ -193,4 +193,22 @@ describe("GitVault", () => {
     assert.equal((await second.load("Project", right.id)).name, "Right");
     assert.equal(first.stats().dirty, false);
   });
+
+  it("rolls back every written file when a transaction fails", async () => {
+    const v = new GitVault(tempDir);
+    await v.init();
+    const before = v.stats().totalCommits;
+
+    await assert.rejects(
+      () => v.withTransaction(async () => {
+        await v.save(createProject({ id: "project.transaction_rollback", name: "Rollback", goal: "g" }));
+        throw new Error("injected write failure");
+      }, { message: "[test] rollback" }),
+      /injected write failure/
+    );
+
+    assert.equal(await v.load("Project", "project.transaction_rollback"), null);
+    assert.equal(v.stats().totalCommits, before);
+    assert.equal(v.stats().dirty, false);
+  });
 });

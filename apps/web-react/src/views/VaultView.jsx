@@ -5,8 +5,8 @@ import { archiveVault } from "../api/core.js";
 export default function VaultView({ refreshKey, toast }) {
   const validationUrl = `/api/validation?t=${refreshKey}`;
   const maintenanceUrl = `/api/vault-maintenance?t=${refreshKey}`;
-  const { data: validation, refresh: rev1 } = useFetch(validationUrl);
-  const { data: maintenance, refresh: rev2 } = useFetch(maintenanceUrl);
+  const { data: validation, loading: vLoading, error: vError, refresh: rev1 } = useFetch(validationUrl);
+  const { data: maintenance, loading: mLoading, error: mError, refresh: rev2 } = useFetch(maintenanceUrl);
   const [archiving, setArchiving] = useState(false);
 
   const handleArchive = async () => {
@@ -31,8 +31,18 @@ export default function VaultView({ refreshKey, toast }) {
   const v = validation || {};
   const m = maintenance || {};
 
+  if ((vLoading && !validation) || (mLoading && !maintenance)) {
+    return <div className="skeleton" style={{ height: "200px" }}>加载中</div>;
+  }
+
   return (
     <>
+      {(vError || mError) && (
+        <div className="error-banner" style={{ marginBottom: "14px" }}>
+          <span>{vError || mError}</span>
+          <button onClick={() => { rev1(); rev2(); }}>重试</button>
+        </div>
+      )}
       <div className="status-strip">
         <div className="status">
           <strong>检查记录</strong>

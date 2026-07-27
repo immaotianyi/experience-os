@@ -29,6 +29,7 @@ import {
   createConversationEvent,
   createWorkCheckpoint,
   createExperienceAsset,
+  createExperienceReuseTrial,
   createReuseContext,
   nowIso,
   AUTONOMY_MODES,
@@ -37,6 +38,8 @@ import {
   EVIDENCE_TYPES
 } from "./domain.js";
 import { assertAllowed, evaluatePolicy } from "./executionPolicy.js";
+import { randomBytes } from "node:crypto";
+const nonce = (n = 4) => randomBytes(n).toString("hex");
 
 function ensureString(value, field) {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -133,6 +136,16 @@ async function appendToProjectArray(vault, projectId, fieldName, newId) {
   } else {
     await doAppend();
   }
+}
+
+async function withVaultTransaction(vault, work, message) {
+  if (typeof vault.withTransaction === "function") {
+    return vault.withTransaction(work, { message });
+  }
+  if (typeof vault.withWriteLock === "function") {
+    return vault.withWriteLock(work);
+  }
+  return work();
 }
 
 /**
@@ -233,34 +246,29 @@ export async function addEvidenceLink(vault, {
   ensureArray(applicabilityBounds, "applicabilityBounds");
   ensureArray(tags, "tags");
   ensureOrigin(origin);
-  const project = await requireProject(vault, projectId);
-  guardAiWrite("save_evidence", project, origin);
-
   const validatedUncertainty = ensureUncertainty(uncertainty);
-
-  const link = createEvidenceLink({
-    id,
-    projectId,
-    type,
-    title,
-    source,
-    hash,
-    notes,
-    uncertainty: validatedUncertainty,
-    counterexamples,
-    applicabilityBounds,
-    tags,
-    origin,
-    actor
-  });
-  await vault.save(link);
-
-  // Atomically append the evidence ID to the project's evidenceLinkIds.
-  // Re-load the project inside the write lock to avoid TOCTOU race conditions
-  // where two concurrent requests could overwrite each other's evidenceLinkIds.
-  await appendToProjectArray(vault, projectId, "evidenceLinkIds", id);
-
-  return link;
+  return withVaultTransaction(vault, async () => {
+    const project = await requireProject(vault, projectId);
+    guardAiWrite("save_evidence", project, origin);
+    const link = createEvidenceLink({
+      id,
+      projectId,
+      type,
+      title,
+      source,
+      hash,
+      notes,
+      uncertainty: validatedUncertainty,
+      counterexamples,
+      applicabilityBounds,
+      tags,
+      origin,
+      actor
+    });
+    await vault.save(link);
+    await appendToProjectArray(vault, projectId, "evidenceLinkIds", id);
+    return link;
+  }, `[EvidenceLink] capture: ${id}`);
 }
 
 export async function listEvidenceForProject(vault, projectId) {
@@ -308,32 +316,30 @@ export async function writeExperienceReceipt(vault, {
   ensureOrigin(origin);
   const validatedUncertainty = ensureUncertainty(uncertainty);
 
-  const project = await requireProject(vault, projectId);
-  guardAiWrite("write_receipt", project, origin);
-  const verifiedEvidenceIds = await requireProjectEvidence(vault, projectId, evidenceLinkIds);
-
-  const receipt = createExperienceReceipt({
-    id,
-    projectId,
-    phase,
-    summary,
-    evidenceLinkIds: verifiedEvidenceIds,
-    outcome,
-    uncertainty: validatedUncertainty,
-    counterexamples,
-    applicabilityBounds,
-    lessonsLearned,
-    autonomyMode,
-    sourceDraftId,
-    origin,
-    actor
-  });
-  await vault.save(receipt);
-
-  // Atomically append the receipt ID to the project's experienceReceiptIds.
-  await appendToProjectArray(vault, projectId, "experienceReceiptIds", id);
-
-  return receipt;
+  return withVaultTransaction(vault, async () => {
+    const project = await requireProject(vault, projectId);
+    guardAiWrite("write_receipt", project, origin);
+    const verifiedEvidenceIds = await requireProjectEvidence(vault, projectId, evidenceLinkIds);
+    const receipt = createExperienceReceipt({
+      id,
+      projectId,
+      phase,
+      summary,
+      evidenceLinkIds: verifiedEvidenceIds,
+      outcome,
+      uncertainty: validatedUncertainty,
+      counterexamples,
+      applicabilityBounds,
+      lessonsLearned,
+      autonomyMode,
+      sourceDraftId,
+      origin,
+      actor
+    });
+    await vault.save(receipt);
+    await appendToProjectArray(vault, projectId, "experienceReceiptIds", id);
+    return receipt;
+  }, `[ExperienceReceipt] create: ${id}`);
 }
 
 export async function listReceiptsForProject(vault, projectId) {
@@ -352,8 +358,28 @@ function parseDraftJson(content) {
   }
 }
 
-function draftStringArray(value) {
-  return Array.isArray(value) ? value.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim()) : [];
+function normalizeDraftStringArray(value, field) {
+  if (Array.isArray(value)) {
+    return { value: value.filter((item) => typeof item === "string" && item.trim()).map((item) => item.trim()), warning: null };
+  }
+  if (typeof value === "string" && value.trim()) {
+    return {
+      value: [value.trim()],
+      warning: `模型将 ${field} 返回为单段文字；EOS 已保留为一条列表项，等待人类复核。`
+    };
+  }
+  return { value: [], warning: null };
+}
+
+function normalizeDraftUncertainty(value) {
+  try {
+    return { value: ensureUncertainty(value), warning: null };
+  } catch {
+    return {
+      value: null,
+      warning: "模型返回的不确定性不是 0 到 1 的数值；EOS 已将其降级为未知，等待人类判断。"
+    };
+  }
 }
 
 /**
@@ -389,12 +415,26 @@ export async function proposeExperienceReceiptDraft(vault, llm, { id, projectId,
   const response = await llm.complete({
     system: "You propose a cited Experience Receipt draft. You cannot create verified experience or make a human decision.",
     prompt: `Experience Receipt DRAFT\nProject: ${project.name}\nGoal: ${project.goal}\n\nUse only these consented materials:\n${materials}\n\nReturn JSON with phase, summary, outcome, uncertainty, counterexamples, applicabilityBounds, lessonsLearned.`,
-    maxTokens: 900,
+    // Reasoning-capable models may spend part of the budget before emitting
+    // the final JSON. Keep enough headroom for a complete, reviewable draft.
+    maxTokens: 1800,
     temperature: 0.2
   });
   const proposed = parseDraftJson(response.content);
   const outcome = OUTCOME_STATES.includes(proposed.outcome) ? proposed.outcome : "unknown";
-  const uncertainty = ensureUncertainty(proposed.uncertainty);
+  const normalizedUncertainty = normalizeDraftUncertainty(proposed.uncertainty);
+  const counterexamples = normalizeDraftStringArray(proposed.counterexamples, "counterexamples");
+  const applicabilityBounds = normalizeDraftStringArray(proposed.applicabilityBounds, "applicabilityBounds");
+  const lessonsLearned = normalizeDraftStringArray(proposed.lessonsLearned, "lessonsLearned");
+  const generationWarnings = [
+    ...(normalizedUncertainty.warning ? [normalizedUncertainty.warning] : []),
+    ...(counterexamples.warning ? [counterexamples.warning] : []),
+    ...(applicabilityBounds.warning ? [applicabilityBounds.warning] : []),
+    ...(lessonsLearned.warning ? [lessonsLearned.warning] : []),
+    ...(!OUTCOME_STATES.includes(proposed.outcome) && proposed.outcome !== undefined
+      ? ["模型返回的 outcome 不符合受控枚举；EOS 已降级为 unknown，不将其作为结果事实。"]
+      : [])
+  ];
   const draft = createExperienceReceiptDraft({
     id,
     projectId,
@@ -403,11 +443,96 @@ export async function proposeExperienceReceiptDraft(vault, llm, { id, projectId,
     phase: typeof proposed.phase === "string" && proposed.phase.trim() ? proposed.phase.trim() : "协作",
     summary: ensureString(proposed.summary, "LLM draft summary"),
     outcome,
-    uncertainty,
-    counterexamples: draftStringArray(proposed.counterexamples),
-    applicabilityBounds: draftStringArray(proposed.applicabilityBounds),
-    lessonsLearned: draftStringArray(proposed.lessonsLearned),
-    generatedBy: { provider: llm.name, model: response.model, usage: response.usage }
+    uncertainty: normalizedUncertainty.value,
+    counterexamples: counterexamples.value,
+    applicabilityBounds: applicabilityBounds.value,
+    lessonsLearned: lessonsLearned.value,
+    generationWarnings,
+    generatedBy: {
+      provider: llm.name,
+      model: response.model,
+      mode: llm.mode === "live" ? "live" : "rehearsal",
+      usage: response.usage
+    }
+  });
+  await vault.save(draft);
+  return draft;
+}
+
+/**
+ * Receive a receipt proposal generated inside an already-active external AI
+ * client. EOS never calls that client's cloud model or reads its credentials.
+ * The proposal is constrained to consented checkpoint IDs, then waits for the
+ * same human review as an EOS-direct draft.
+ */
+export async function submitAgentExperienceReceiptDraft(vault, {
+  id,
+  projectId,
+  checkpointIds,
+  proposal,
+  agent
+}) {
+  ensureString(id, "id");
+  ensureString(projectId, "projectId");
+  ensureObject(proposal, "proposal");
+  ensureObject(agent, "agent");
+  const agentProvider = ensureString(agent.provider, "agent.provider");
+  const agentModel = ensureString(agent.model, "agent.model");
+  const agentActor = ensureString(agent.actor, "agent.actor");
+  const uniqueCheckpointIds = [...new Set(ensureArray(checkpointIds, "checkpointIds"))];
+  if (uniqueCheckpointIds.length === 0) throw new Error("checkpointIds must contain at least one checkpoint");
+  await requireProject(vault, projectId);
+
+  const checkpoints = [];
+  for (const checkpointId of uniqueCheckpointIds) {
+    ensureString(checkpointId, "checkpointIds item");
+    const checkpoint = await vault.load("WorkCheckpoint", checkpointId);
+    if (!checkpoint) throw new Error(`work checkpoint not found: ${checkpointId}`);
+    if (checkpoint.projectId !== projectId) throw new Error(`work checkpoint ${checkpointId} belongs to another project`);
+    checkpoints.push(checkpoint);
+  }
+  const evidenceLinkIds = [...new Set(checkpoints.map((checkpoint) => checkpoint.evidenceLinkId))];
+  await requireProjectEvidence(vault, projectId, evidenceLinkIds);
+  const events = await Promise.all(checkpoints.map((checkpoint) => vault.load("ConversationEvent", checkpoint.eventId)));
+  if (events.some((event) => !event || event.projectId !== projectId || event.consented !== true)) {
+    throw new Error("every work checkpoint must reference a consented event in this project");
+  }
+
+  const outcome = OUTCOME_STATES.includes(proposal.outcome) ? proposal.outcome : "unknown";
+  const normalizedUncertainty = normalizeDraftUncertainty(proposal.uncertainty);
+  const counterexamples = normalizeDraftStringArray(proposal.counterexamples, "counterexamples");
+  const applicabilityBounds = normalizeDraftStringArray(proposal.applicabilityBounds, "applicabilityBounds");
+  const lessonsLearned = normalizeDraftStringArray(proposal.lessonsLearned, "lessonsLearned");
+  const generationWarnings = [
+    "此草案由当前协作工具的 Agent 提交；EOS 没有调用或保存该工具的云端凭证。",
+    ...(normalizedUncertainty.warning ? [normalizedUncertainty.warning] : []),
+    ...(counterexamples.warning ? [counterexamples.warning] : []),
+    ...(applicabilityBounds.warning ? [applicabilityBounds.warning] : []),
+    ...(lessonsLearned.warning ? [lessonsLearned.warning] : []),
+    ...(!OUTCOME_STATES.includes(proposal.outcome) && proposal.outcome !== undefined
+      ? ["Agent 返回的 outcome 不符合受控枚举；EOS 已降级为 unknown，不将其作为结果事实。"]
+      : [])
+  ];
+  const draft = createExperienceReceiptDraft({
+    id,
+    projectId,
+    checkpointIds: uniqueCheckpointIds,
+    evidenceLinkIds,
+    phase: typeof proposal.phase === "string" && proposal.phase.trim() ? proposal.phase.trim() : "协作",
+    summary: ensureString(proposal.summary, "agent draft summary"),
+    outcome,
+    uncertainty: normalizedUncertainty.value,
+    counterexamples: counterexamples.value,
+    applicabilityBounds: applicabilityBounds.value,
+    lessonsLearned: lessonsLearned.value,
+    generationWarnings,
+    generatedBy: {
+      provider: agentProvider,
+      model: agentModel,
+      mode: "agent_hosted",
+      actor: agentActor,
+      sourceTool: typeof agent.sourceTool === "string" ? agent.sourceTool.trim() : agentProvider
+    }
   });
   await vault.save(draft);
   return draft;
@@ -425,30 +550,32 @@ export async function acceptExperienceReceiptDraft(vault, { draftId, receiptId, 
   ensureString(receiptId, "receiptId");
   ensureString(actor, "actor");
   ensureObject(edits, "edits");
-  const draft = await vault.load("ExperienceReceiptDraft", draftId);
-  if (!draft) throw new Error(`experience receipt draft not found: ${draftId}`);
-  if (draft.status !== "pending_review") throw new Error("only a pending receipt draft can be accepted");
   const allowedEdits = new Set(["phase", "summary", "outcome", "uncertainty", "counterexamples", "applicabilityBounds", "lessonsLearned"]);
   const unknownEdits = Object.keys(edits).filter((key) => !allowedEdits.has(key));
   if (unknownEdits.length) throw new Error(`receipt draft edits are not allowed: ${unknownEdits.join(", ")}`);
-  const receipt = await writeExperienceReceipt(vault, {
-    id: receiptId,
-    projectId: draft.projectId,
-    phase: edits.phase ?? draft.phase,
-    summary: edits.summary ?? draft.summary,
-    evidenceLinkIds: draft.evidenceLinkIds,
-    outcome: edits.outcome ?? draft.outcome,
-    uncertainty: edits.uncertainty ?? draft.uncertainty,
-    counterexamples: edits.counterexamples ?? draft.counterexamples,
-    applicabilityBounds: edits.applicabilityBounds ?? draft.applicabilityBounds,
-    lessonsLearned: edits.lessonsLearned ?? draft.lessonsLearned,
-    autonomyMode: "advise",
-    sourceDraftId: draftId,
-    origin: "human",
-    actor
-  });
-  await vault.save({ ...draft, status: "accepted", acceptedReceiptId: receipt.id, acceptedBy: actor, updatedAt: nowIso() });
-  return { draft: await vault.load("ExperienceReceiptDraft", draftId), receipt };
+  return withVaultTransaction(vault, async () => {
+    const draft = await vault.load("ExperienceReceiptDraft", draftId);
+    if (!draft) throw new Error(`experience receipt draft not found: ${draftId}`);
+    if (draft.status !== "pending_review") throw new Error("only a pending receipt draft can be accepted");
+    const receipt = await writeExperienceReceipt(vault, {
+      id: receiptId,
+      projectId: draft.projectId,
+      phase: edits.phase ?? draft.phase,
+      summary: edits.summary ?? draft.summary,
+      evidenceLinkIds: draft.evidenceLinkIds,
+      outcome: edits.outcome ?? draft.outcome,
+      uncertainty: edits.uncertainty ?? draft.uncertainty,
+      counterexamples: edits.counterexamples ?? draft.counterexamples,
+      applicabilityBounds: edits.applicabilityBounds ?? draft.applicabilityBounds,
+      lessonsLearned: edits.lessonsLearned ?? draft.lessonsLearned,
+      autonomyMode: "advise",
+      sourceDraftId: draftId,
+      origin: "human",
+      actor
+    });
+    await vault.save({ ...draft, status: "accepted", acceptedReceiptId: receipt.id, acceptedBy: actor, updatedAt: nowIso() });
+    return { draft: await vault.load("ExperienceReceiptDraft", draftId), receipt };
+  }, `[ExperienceReceiptDraft] accept: ${draftId}`);
 }
 
 export async function rejectExperienceReceiptDraft(vault, { draftId, actor = "human", reason = "" }) {
@@ -458,6 +585,38 @@ export async function rejectExperienceReceiptDraft(vault, { draftId, actor = "hu
   if (!draft) throw new Error(`experience receipt draft not found: ${draftId}`);
   if (draft.status !== "pending_review") throw new Error("only a pending receipt draft can be rejected");
   const updated = { ...draft, status: "rejected", rejectedBy: actor, rejectionReason: String(reason || "").trim(), updatedAt: nowIso() };
+  await vault.save(updated);
+  return updated;
+}
+
+// Deferral preserves a visible human decision without converting a draft into
+// an experience or silently treating it as forgotten.
+export async function deferExperienceReceiptDraft(vault, { draftId, actor = "human", reason = "" }) {
+  ensureString(draftId, "draftId");
+  ensureString(actor, "actor");
+  const draft = await vault.load("ExperienceReceiptDraft", draftId);
+  if (!draft) throw new Error(`experience receipt draft not found: ${draftId}`);
+  if (draft.status !== "pending_review") throw new Error("only a pending receipt draft can be deferred");
+  const updated = { ...draft, status: "deferred", deferredBy: actor, deferralReason: String(reason || "").trim(), updatedAt: nowIso() };
+  await vault.save(updated);
+  return updated;
+}
+
+// A deferral is a pause, not a rejection. Reopening returns the same sourced
+// draft to human review without manufacturing a second LLM proposal.
+export async function resumeExperienceReceiptDraft(vault, { draftId, actor = "human" }) {
+  ensureString(draftId, "draftId");
+  ensureString(actor, "actor");
+  const draft = await vault.load("ExperienceReceiptDraft", draftId);
+  if (!draft) throw new Error(`experience receipt draft not found: ${draftId}`);
+  if (draft.status !== "deferred") throw new Error("only a deferred receipt draft can be resumed");
+  const updated = {
+    ...draft,
+    status: "pending_review",
+    resumedBy: actor,
+    resumedAt: nowIso(),
+    updatedAt: nowIso()
+  };
   await vault.save(updated);
   return updated;
 }
@@ -597,7 +756,7 @@ export async function buildProjectTimeline(vault, projectId) {
     ...checkpoints.map((checkpoint) => ({ kind: "WorkCheckpoint", timestamp: checkpoint.createdAt, record: checkpoint }))
   ];
 
-  timeline.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  timeline.sort((a, b) => (b.timestamp || "").localeCompare(a.timestamp || ""));
 
   return {
     projectId,
@@ -656,7 +815,8 @@ export async function captureWorkCheckpoint(vault, {
   sourceRef = null,
   notes = "",
   actor = "human",
-  consented = false
+  consented = false,
+  capturePermitId = null
 }) {
   ensureString(id, "id");
   ensureString(eventId, "eventId");
@@ -666,6 +826,7 @@ export async function captureWorkCheckpoint(vault, {
   ensureString(content, "content");
   ensureString(sourceTool, "sourceTool");
   ensureString(actor, "actor");
+  if (capturePermitId !== null) ensureString(capturePermitId, "capturePermitId");
   if (consented !== true) throw new Error("work checkpoint requires explicit consent");
 
   const writeCheckpoint = async () => {
@@ -685,7 +846,8 @@ export async function captureWorkCheckpoint(vault, {
       content,
       sourceTool,
       sourceRef,
-      consented: true
+      consented: true,
+      capturePermitId
     });
     const evidence = createEvidenceLink({
       id: evidenceId,
@@ -695,7 +857,8 @@ export async function captureWorkCheckpoint(vault, {
       source: sourceRef ? `${sourceTool}:${sourceRef}` : `relay:${sourceTool}`,
       notes,
       origin: "relay",
-      actor
+      actor,
+      capturePermitId
     });
     const checkpoint = createWorkCheckpoint({
       id,
@@ -703,7 +866,8 @@ export async function captureWorkCheckpoint(vault, {
       title,
       eventId,
       evidenceLinkId: evidenceId,
-      notes
+      notes,
+      capturePermitId
     });
 
     await vault.save(event);
@@ -717,9 +881,11 @@ export async function captureWorkCheckpoint(vault, {
     return { checkpoint, event, evidence };
   };
 
-  return typeof vault.withWriteLock === "function"
-    ? vault.withWriteLock(writeCheckpoint)
-    : writeCheckpoint();
+  return withVaultTransaction(
+    vault,
+    writeCheckpoint,
+    `[WorkCheckpoint] capture: ${id}`
+  );
 }
 
 /**
@@ -779,6 +945,85 @@ export async function getProjectReadiness(vault, projectId) {
   return { projectId, receipts: ready, policy: evaluatePolicy("publish_skill", (await requireProject(vault, projectId)).autonomyMode) };
 }
 
+/**
+ * Read-only trial evidence. This deliberately reports observed workflow facts
+ * rather than inventing a product-value score from record counts.
+ */
+export async function getProjectTrialEvidence(vault, projectId) {
+  await requireProject(vault, projectId);
+  const [timeline, drafts, assets, reuseContexts, reuseTrials] = await Promise.all([
+    buildProjectTimeline(vault, projectId),
+    listExperienceReceiptDrafts(vault, projectId),
+    vault.list("ExperienceAsset"),
+    vault.list("ReuseContext"),
+    vault.list("ExperienceReuseTrial")
+  ]);
+  const receipts = timeline.timeline.filter((item) => item.kind === "ExperienceReceipt").map((item) => item.record);
+  const handledDurations = drafts
+    .filter((draft) => draft.status === "accepted" || draft.status === "rejected")
+    .map((draft) => Date.parse(draft.updatedAt) - Date.parse(draft.createdAt))
+    .filter((duration) => Number.isFinite(duration) && duration >= 0)
+    .sort((a, b) => a - b);
+  const middle = Math.floor(handledDurations.length / 2);
+  const medianReviewMs = handledDurations.length === 0
+    ? null
+    : handledDurations.length % 2
+      ? handledDurations[middle]
+      : Math.round((handledDurations[middle - 1] + handledDurations[middle]) / 2);
+  const coveredReceipts = receipts.filter((receipt) => receipt.evidenceLinkIds.length > 0).length;
+  const feedback = reuseContexts
+    .filter((context) => context.projectId === projectId && context.query === "verified_experience_feedback")
+    .flatMap((context) => context.contributionCandidates || [])
+    .map((candidate) => candidate.outcome)
+    .filter((outcome) => ["adopted", "ignored", "not_applicable"].includes(outcome));
+  const feedbackByOutcome = Object.fromEntries(
+    ["adopted", "ignored", "not_applicable"].map((outcome) => [outcome, feedback.filter((item) => item === outcome).length])
+  );
+  const approvedAssets = assets.filter((asset) => asset.projectId === projectId && asset.status === "approved");
+  const projectReuseTrials = reuseTrials.filter((trial) => trial.projectId === projectId);
+  const completedReuseTrials = projectReuseTrials.filter((trial) => trial.completedAt);
+  const valueBearingReuseTrials = completedReuseTrials.filter((trial) => trial.reducedRepeatedDecision === true && ["success", "partial"].includes(trial.outcome));
+
+  return {
+    projectId,
+    draftReview: {
+      total: drafts.length,
+      pending: drafts.filter((draft) => draft.status === "pending_review").length,
+      handled: handledDurations.length,
+      medianReviewMs
+    },
+    evidenceCoverage: {
+      receipts: receipts.length,
+      coveredReceipts,
+      ratio: receipts.length === 0 ? null : coveredReceipts / receipts.length
+    },
+    verification: {
+      successfulOutcomes: timeline.timeline.filter((item) => item.kind === "OutcomeRecord" && item.record.outcome === "success").length,
+      approvedAssets: approvedAssets.length
+    },
+    reuseFeedback: { total: feedback.length, ...feedbackByOutcome },
+    reuseTrials: {
+      total: projectReuseTrials.length,
+      pending: projectReuseTrials.length - completedReuseTrials.length,
+      completed: completedReuseTrials.length,
+      reducedRepeatedDecision: valueBearingReuseTrials.length
+    },
+    interpretation: {
+      isSufficientForValueClaim: valueBearingReuseTrials.length > 0,
+      missingEvidence: [
+        ...(timeline.counts.checkpoints === 0 ? ["还没有明确同意的工作节点。"] : []),
+        ...(drafts.length === 0 ? ["还没有处理过收据草案，无法比较提炼是否省时。"] : []),
+        ...(receipts.length > 0 && coveredReceipts < receipts.length ? ["存在没有来源证据的收据。"] : []),
+        ...(approvedAssets.length === 0 ? ["还没有完成结果验证并升级的经验资产。"] : []),
+        ...(feedback.length === 0 && projectReuseTrials.length === 0
+          ? ["还没有记录一次对经验建议的采纳、拒绝或不适用反馈。"]
+          : []),
+        ...(valueBearingReuseTrials.length === 0 ? ["还没有完成一次“采用经验后减少重复判断”的复用试验。"] : [])
+      ]
+    }
+  };
+}
+
 /** Read-only, conservative reuse: only approved experience assets, never drafts. */
 export async function getVerifiedExperienceSuggestions(vault, projectId, query = "") {
   const project = await requireProject(vault, projectId);
@@ -806,7 +1051,7 @@ export async function recordExperienceReuseFeedback(vault, { projectId, assetId,
   const asset = await vault.load("ExperienceAsset", assetId);
   if (!asset || asset.status !== "approved" || asset.projectId === projectId) throw new Error("feedback requires an approved experience asset from another project");
   const context = createReuseContext({
-    id: `reuse.${projectId}.${Date.now()}`,
+    id: `reuse.${projectId}.${Date.now()}.${nonce()}`,
     projectId,
     query: "verified_experience_feedback",
     matchedRecordIds: [{ id: assetId, kind: "ExperienceAsset", score: 1 }],
@@ -815,4 +1060,40 @@ export async function recordExperienceReuseFeedback(vault, { projectId, assetId,
   });
   await vault.save(context);
   return context;
+}
+
+export async function startExperienceReuseTrial(vault, { id, projectId, assetId, taskTitle, decisionNote = "" }) {
+  ensureString(id, "id");
+  ensureString(projectId, "projectId");
+  ensureString(assetId, "assetId");
+  ensureString(taskTitle, "taskTitle");
+  await requireProject(vault, projectId);
+  const asset = await vault.load("ExperienceAsset", assetId);
+  if (!asset || asset.status !== "approved") throw new Error("reuse trial requires an approved experience asset");
+  if (asset.projectId === projectId) throw new Error("reuse trial must test experience in another project");
+  const trial = createExperienceReuseTrial({
+    id, projectId, assetId, sourceProjectId: asset.projectId, taskTitle: taskTitle.trim(), decisionNote: String(decisionNote).trim()
+  });
+  await vault.save(trial);
+  return trial;
+}
+
+export async function completeExperienceReuseTrial(vault, { id, projectId, outcome, outcomeNote = "", reducedRepeatedDecision }) {
+  ensureString(id, "id");
+  ensureString(projectId, "projectId");
+  if (!OUTCOME_STATES.includes(outcome) || outcome === "unknown") throw new Error("reuse trial outcome must be success, partial, or failure");
+  if (typeof reducedRepeatedDecision !== "boolean") throw new Error("reducedRepeatedDecision must be boolean");
+  const trial = await vault.load("ExperienceReuseTrial", id);
+  if (!trial || trial.projectId !== projectId) throw new Error("reuse trial not found in this project");
+  if (trial.completedAt) throw new Error("reuse trial is already completed");
+  const completed = { ...trial, outcome, outcomeNote: String(outcomeNote).trim(), reducedRepeatedDecision, completedAt: nowIso(), updatedAt: nowIso() };
+  await vault.save(completed);
+  return completed;
+}
+
+export async function listExperienceReuseTrials(vault, projectId) {
+  await requireProject(vault, projectId);
+  return (await vault.list("ExperienceReuseTrial"))
+    .filter((trial) => trial.projectId === projectId)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }

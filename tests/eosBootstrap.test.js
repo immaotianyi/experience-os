@@ -18,7 +18,9 @@ describe("EOS workspace bootstrap", () => {
     const manifest = JSON.parse(await readFile(path.join(workspace, ".eos", "project.json"), "utf8"));
     const mcp = JSON.parse(await readFile(path.join(workspace, ".eos", "mcp.json"), "utf8"));
     assert.equal(manifest.capture.defaultConsent, false);
+    assert.equal(manifest.capture.policy, "strict_permit");
     assert.equal(mcp.mcpServers["experience-os"].env.EOS_VAULT_DIR, path.join(workspace, ".eos", "vault"));
+    assert.equal(mcp.mcpServers["experience-os"].env.EOS_CAPTURE_POLICY, "strict_permit");
   });
 
   it("is idempotent and preserves the first project record", async () => {

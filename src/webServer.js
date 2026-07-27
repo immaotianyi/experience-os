@@ -4,6 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { GitVault } from "./gitVault.js";
 import { createLLMAdapter } from "./llmAdapter.js";
+import { buildAttentionSnapshot } from "./attentionStatus.js";
+import { submitBetaFeedback } from "./betaFeedback.js";
 import { applyReviewDecision } from "./reviewEngine.js";
 import { validateVault } from "./validate.js";
 import { archiveVaultCandidates, buildVaultMaintenancePreview } from "./vaultMaintenance.js";
@@ -11,7 +13,7 @@ import { latest, slug } from "./utils.js";
 import { exportSkillAsMcpServer, exportAllStableSkills } from "./mcpExporter.js";
 import { buildLocalIndex, searchIndex, importSkill, getSkillMetadata, listCategories } from "./skillRegistry.js";
 import { assignReviewers, submitVote, addDiscussionComment, checkConfirmationStatus, finalizeTeamReview, getReviewSummary } from "./teamReviewEngine.js";
-import { applyOwnership, canRead, canEdit, filterReadable, contextFromRequest } from "./accessControl.js";
+import { applyOwnership, canRead, canEdit, canReview, filterReadable, contextFromRequest } from "./accessControl.js";
 import { publishSkill, unpublishSkill, suspendListing, searchMarketplace, getListingDetails, listPublishedVersions, recordDownload, getMarketplaceStats } from "./marketplace.js";
 import { submitRating, getRatingSummary, getSkillQualityReport, autoFlagLowQuality, getQualityLeaderboard } from "./qualityRating.js";
 import { validatePricing, calculateCommission, checkTrial, computePurchaseBreakdown, verifyLicenseKey } from "./pricingEngine.js";
@@ -28,6 +30,8 @@ import {
   listExperienceReceiptDrafts,
   acceptExperienceReceiptDraft,
   rejectExperienceReceiptDraft,
+  deferExperienceReceiptDraft,
+  resumeExperienceReceiptDraft,
   recordDecision,
   recordOutcome,
   buildProjectTimeline,
@@ -36,9 +40,19 @@ import {
   promoteExperienceAsset,
   getVerifiedExperienceSuggestions,
   recordExperienceReuseFeedback,
-  getProjectReadiness
+  startExperienceReuseTrial,
+  completeExperienceReuseTrial,
+  listExperienceReuseTrials,
+  getProjectReadiness,
+  getProjectTrialEvidence
 } from "./projectEngine.js";
 import { resolveVaultDir, projectRoot } from "./vaultPath.js";
+import {
+  listCapturePermitRequests,
+  listCapturePermitActivity,
+  approveCapturePermitRequest,
+  rejectCapturePermitRequest
+} from "./capturePermitStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = projectRoot;
@@ -48,6 +62,37 @@ const webDir = path.join(rootDir, "apps", "web");
 const vault = new GitVault(resolveVaultDir("real"));
 const llm = createLLMAdapter({ maxTotalTokens: 100000 });
 const port = Number(process.env.PORT ?? 4173);
+const host = process.env.EOS_HOST ?? "127.0.0.1";
+const mockDraftsAllowed = process.env.EOS_ALLOW_MOCK_DRAFTS === "1";
+const deploymentMode = process.env.EOS_DEPLOYMENT_MODE ?? "local";
+const betaFeedbackAttempts = new Map();
+
+// Periodic cleanup of expired rate-limit entries to prevent memory leaks
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, timestamps] of betaFeedbackAttempts) {
+    const fresh = timestamps.filter((t) => now - t < 3600_000);
+    if (fresh.length === 0) {
+      betaFeedbackAttempts.delete(key);
+    } else if (fresh.length !== timestamps.length) {
+      betaFeedbackAttempts.set(key, fresh);
+    }
+  }
+}, 600_000).unref();
+
+function llmRuntimeStatus() {
+  return {
+    adapter: llm.name,
+    model: llm.defaultModel,
+    mode: llm.mode,
+    isLive: llm.mode === "live",
+    mockDraftsAllowed,
+    fallbackReason: llm.fallbackReason,
+    totalUsage: llm.totalUsage,
+    budgetRemaining: llm.budgetRemaining,
+    maxTotalTokens: llm.maxTotalTokens
+  };
+}
 
 const contentTypes = {
   ".html": "text/html; charset=utf-8",
@@ -69,6 +114,14 @@ const contentTypes = {
 
 await vault.init();
 
+// Global crash protection — prevents single request errors from killing the process
+process.on("unhandledRejection", (reason) => {
+  console.error("[webServer] unhandledRejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[webServer] uncaughtException:", err.message);
+});
+
 createServer(async (request, response) => {
   try {
     const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
@@ -81,7 +134,8 @@ createServer(async (request, response) => {
       ? path.join(webDir, "index.html")
       : path.join(webDir, path.normalize(url.pathname));
 
-    if (!filePath.startsWith(webDir)) {
+    // Use path.sep to prevent prefix-directory bypass (e.g. /web-secret)
+    if (filePath !== webDir && !filePath.startsWith(webDir + path.sep)) {
       send(response, 403, "Forbidden", "text/plain; charset=utf-8");
       return;
     }
@@ -108,8 +162,8 @@ createServer(async (request, response) => {
     const body = safeErrorMessage(error);
     send(response, status, body, "text/plain; charset=utf-8");
   }
-}).listen(port, () => {
-  console.log(`Experience OS Web UI: http://localhost:${port}`);
+}).listen(port, host, () => {
+  console.log(`Experience OS Web UI (${deploymentMode}): http://${host}:${port}`);
 });
 
 /**
@@ -139,6 +193,71 @@ function safeErrorMessage(error) {
 }
 
 async function handleApi(request, url, response) {
+  if (url.pathname === "/api/health") {
+    sendJson(response, {
+      ok: true,
+      service: "experience-os",
+      mode: deploymentMode,
+      generatedAt: new Date().toISOString()
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/beta-feedback" && request.method === "POST") {
+    const address = request.socket.remoteAddress ?? "unknown";
+    const now = Date.now();
+    const attempts = (betaFeedbackAttempts.get(address) ?? []).filter((at) => now - at < 60 * 60 * 1000);
+    if (attempts.length === 0) betaFeedbackAttempts.delete(address);
+    if (attempts.length >= 5) {
+      sendJson(response, { error: "Too many feedback submissions. Please try again later." }, 429);
+      return;
+    }
+    attempts.push(now);
+    betaFeedbackAttempts.set(address, attempts);
+    try {
+      const feedback = await submitBetaFeedback(vault, await readJsonBody(request));
+      sendJson(response, { ok: true, id: feedback.id }, 201);
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/beta-feedback" && request.method === "GET") {
+    const records = latest(await vault.list("BetaFeedback"), 100);
+    const userContext = contextFromRequest(request);
+    const isAdmin = !userContext || userContext.role === "admin";
+    const safe = isAdmin ? records : records.map((r) => { const { contact, ...rest } = r; return rest; });
+    sendJson(response, { kind: "BetaFeedback", records: safe });
+    return;
+  }
+
+  if (url.pathname === "/api/beta-feedback/export" && request.method === "GET") {
+    const userContext = contextFromRequest(request);
+    if (userContext && userContext.role !== "admin") {
+      sendJson(response, { error: "Admin access required for export" }, 403);
+      return;
+    }
+    const records = await vault.list("BetaFeedback");
+    const exported = {
+      exportedAt: new Date().toISOString(),
+      count: records.length,
+      feedback: records.map((r) => ({
+        participantId: r.participantId,
+        stage: r.stage,
+        usefulness: r.usefulness,
+        clarity: r.clarity,
+        wouldUseAgain: r.wouldUseAgain,
+        helped: r.helped,
+        blocked: r.blocked,
+        contact: r.contact,
+        createdAt: r.createdAt
+      }))
+    };
+    sendJson(response, exported);
+    return;
+  }
+
   // Support both singular and plural paths for backward compatibility
   if (request.method === "POST" && (url.pathname === "/api/review-decisions" || url.pathname === "/api/review-decision")) {
     sendJson(response, await handleReviewDecision(request));
@@ -155,7 +274,7 @@ async function handleApi(request, url, response) {
     return;
   }
 
-  if (request.method === "POST" && (url.pathname === "/api/reuse-feedback" || url.pathname === "/api/skill-registry/import" || url.pathname === "/api/mcp/export" || url.pathname === "/api/mcp/export-all" || url.pathname.startsWith("/api/team-review/") || url.pathname.startsWith("/api/marketplace/") || url.pathname.startsWith("/api/quality/") || url.pathname.startsWith("/api/pricing/") || url.pathname.startsWith("/api/transaction/") || url.pathname === "/api/projects" || url.pathname === "/api/project" || url.pathname === "/api/evidence" || url.pathname === "/api/experience-receipts" || url.pathname === "/api/experience-receipt-drafts" || url.pathname === "/api/experience-receipt-drafts/accept" || url.pathname === "/api/experience-receipt-drafts/reject" || url.pathname === "/api/decisions" || url.pathname === "/api/outcomes" || url.pathname === "/api/relay/events" || url.pathname === "/api/work-checkpoints" || url.pathname === "/api/experience-assets")) {
+  if (request.method === "POST" && (url.pathname === "/api/reuse-feedback" || url.pathname === "/api/experience-reuse-trials" || url.pathname === "/api/experience-reuse-trials/complete" || url.pathname === "/api/skill-registry/import" || url.pathname === "/api/mcp/export" || url.pathname === "/api/mcp/export-all" || url.pathname.startsWith("/api/team-review/") || url.pathname.startsWith("/api/marketplace/") || url.pathname.startsWith("/api/quality/") || url.pathname.startsWith("/api/pricing/") || url.pathname.startsWith("/api/transaction/") || url.pathname === "/api/projects" || url.pathname === "/api/project" || url.pathname === "/api/evidence" || url.pathname === "/api/experience-receipts" || url.pathname === "/api/experience-receipt-drafts" || url.pathname === "/api/experience-receipt-drafts/accept" || url.pathname === "/api/experience-receipt-drafts/reject" || url.pathname === "/api/experience-receipt-drafts/defer" || url.pathname === "/api/experience-receipt-drafts/resume" || url.pathname === "/api/decisions" || url.pathname === "/api/outcomes" || url.pathname === "/api/relay/events" || url.pathname === "/api/work-checkpoints" || url.pathname === "/api/experience-assets" || url.pathname === "/api/capture-permits/approve" || url.pathname === "/api/capture-permits/reject")) {
     // Handle below in the specific route handlers
   } else if (request.method !== "GET") {
     sendJson(response, { error: "Method not allowed" }, 405);
@@ -216,13 +335,23 @@ async function handleApi(request, url, response) {
   }
 
   if (url.pathname === "/api/llm/status") {
-    sendJson(response, {
-      adapter: llm.name,
-      model: llm.defaultModel,
-      totalUsage: llm.totalUsage,
-      budgetRemaining: llm.budgetRemaining,
-      maxTotalTokens: llm.maxTotalTokens
-    });
+    sendJson(response, llmRuntimeStatus());
+    return;
+  }
+
+  if (url.pathname === "/api/attention") {
+    const [drafts, reviewPackets, wallHits] = await Promise.all([
+      vault.list("ExperienceReceiptDraft"),
+      vault.list("ReviewPacket"),
+      vault.list("WallHit")
+    ]);
+    let permits = [];
+    try {
+      permits = await listCapturePermitRequests(requireWorkspaceEosDir());
+    } catch (error) {
+      if (!String(error.message).includes("bootstrapped workspace Vault")) throw error;
+    }
+    sendJson(response, buildAttentionSnapshot({ permits, drafts, reviewPackets, wallHits, llm: llmRuntimeStatus() }));
     return;
   }
 
@@ -296,6 +425,68 @@ async function handleApi(request, url, response) {
     return;
   }
 
+  if (url.pathname === "/api/project/trial-evidence" && request.method === "GET") {
+    const projectId = url.searchParams.get("id");
+    if (!projectId) { sendJson(response, { error: "id is required" }, 400); return; }
+    try {
+      sendJson(response, await getProjectTrialEvidence(vault, projectId));
+    } catch (err) {
+      const status = String(err.message).includes("not found") ? 404 : 400;
+      sendJson(response, { error: err.message }, status);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/capture-permits" && request.method === "GET") {
+    const projectId = url.searchParams.get("projectId");
+    if (!projectId) { sendJson(response, { error: "projectId is required" }, 400); return; }
+    try {
+      const eosDir = requireWorkspaceEosDir();
+      const [records, activity] = await Promise.all([
+        listCapturePermitRequests(eosDir, projectId),
+        listCapturePermitActivity(eosDir, projectId)
+      ]);
+      sendJson(response, { records, activity, strictPermitsAvailable: true });
+    } catch (err) {
+      // The default product Vault intentionally has no workspace-local permit
+      // staging area. Treat that as an empty queue, not a broken project view.
+      if (String(err.message).includes("bootstrapped workspace Vault")) {
+        sendJson(response, { records: [], activity: [], strictPermitsAvailable: false });
+      } else {
+        sendJson(response, { error: err.message }, 400);
+      }
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/capture-permits/approve" && request.method === "POST") {
+    try {
+      const body = await readJsonBody(request);
+      sendJson(response, await approveCapturePermitRequest(requireWorkspaceEosDir(), {
+        id: body.id,
+        projectId: body.projectId,
+        approvedBy: body.approvedBy || "human"
+      }));
+    } catch (err) {
+      sendJson(response, { error: err.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/capture-permits/reject" && request.method === "POST") {
+    try {
+      const body = await readJsonBody(request);
+      sendJson(response, await rejectCapturePermitRequest(requireWorkspaceEosDir(), {
+        id: body.id,
+        projectId: body.projectId,
+        rejectedBy: body.rejectedBy || "human"
+      }));
+    } catch (err) {
+      sendJson(response, { error: err.message }, 400);
+    }
+    return;
+  }
+
   if (url.pathname === "/api/reuse-suggestions" && request.method === "GET") {
     const projectId = url.searchParams.get("projectId");
     if (!projectId) { sendJson(response, { error: "projectId is required" }, 400); return; }
@@ -308,6 +499,23 @@ async function handleApi(request, url, response) {
   }
   if (url.pathname === "/api/reuse-feedback" && request.method === "POST") {
     try { sendJson(response, await recordExperienceReuseFeedback(vault, await readJsonBody(request))); }
+    catch (err) { sendJson(response, { error: err.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/experience-reuse-trials" && request.method === "GET") {
+    const projectId = url.searchParams.get("projectId");
+    if (!projectId) { sendJson(response, { error: "projectId is required" }, 400); return; }
+    try { sendJson(response, { records: await listExperienceReuseTrials(vault, projectId) }); }
+    catch (err) { sendJson(response, { error: err.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/experience-reuse-trials" && request.method === "POST") {
+    try { sendJson(response, await startExperienceReuseTrial(vault, await readJsonBody(request))); }
+    catch (err) { sendJson(response, { error: err.message }, 400); }
+    return;
+  }
+  if (url.pathname === "/api/experience-reuse-trials/complete" && request.method === "POST") {
+    try { sendJson(response, await completeExperienceReuseTrial(vault, await readJsonBody(request))); }
     catch (err) { sendJson(response, { error: err.message }, 400); }
     return;
   }
@@ -347,6 +555,12 @@ async function handleApi(request, url, response) {
 
   if (url.pathname === "/api/experience-receipt-drafts" && request.method === "POST") {
     try {
+      if (llm.mode !== "live" && !mockDraftsAllowed) {
+        sendJson(response, {
+          error: "真实 LLM 尚未配置，草案生成已锁定。请配置 LLM_PROVIDER 与对应 API Key；仅用于离线演练时可显式设置 EOS_ALLOW_MOCK_DRAFTS=1。"
+        }, 409);
+        return;
+      }
       const body = await readJsonBody(request);
       sendJson(response, await proposeExperienceReceiptDraft(vault, llm, body));
     } catch (err) { sendJson(response, { error: err.message }, 400); }
@@ -363,6 +577,20 @@ async function handleApi(request, url, response) {
   if (url.pathname === "/api/experience-receipt-drafts/reject" && request.method === "POST") {
     try {
       sendJson(response, await rejectExperienceReceiptDraft(vault, await readJsonBody(request)));
+    } catch (err) { sendJson(response, { error: err.message }, 400); }
+    return;
+  }
+
+  if (url.pathname === "/api/experience-receipt-drafts/defer" && request.method === "POST") {
+    try {
+      sendJson(response, await deferExperienceReceiptDraft(vault, await readJsonBody(request)));
+    } catch (err) { sendJson(response, { error: err.message }, 400); }
+    return;
+  }
+
+  if (url.pathname === "/api/experience-receipt-drafts/resume" && request.method === "POST") {
+    try {
+      sendJson(response, await resumeExperienceReceiptDraft(vault, await readJsonBody(request)));
     } catch (err) { sendJson(response, { error: err.message }, 400); }
     return;
   }
@@ -445,7 +673,7 @@ async function handleApi(request, url, response) {
     if (!projectId) { sendJson(response, { error: "projectId is required" }, 400); return; }
     const events = (await vault.list("ConversationEvent"))
       .filter((event) => event.projectId === projectId)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      .sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
     sendJson(response, { count: events.length, records: events });
     return;
   }
@@ -466,7 +694,7 @@ async function handleApi(request, url, response) {
     if (!projectId) { sendJson(response, { error: "projectId is required" }, 400); return; }
     const checkpoints = (await vault.list("WorkCheckpoint"))
       .filter((checkpoint) => checkpoint.projectId === projectId)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      .sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
     sendJson(response, { count: checkpoints.length, records: checkpoints });
     return;
   }
@@ -485,7 +713,7 @@ async function handleApi(request, url, response) {
     if (!projectId) { sendJson(response, { error: "projectId is required" }, 400); return; }
     const assets = (await vault.list("ExperienceAsset"))
       .filter((asset) => asset.projectId === projectId)
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
     sendJson(response, { count: assets.length, records: assets });
     return;
   }
@@ -726,8 +954,16 @@ async function handleApi(request, url, response) {
   if (url.pathname === "/api/marketplace/unpublish" && request.method === "POST") {
     const body = await readJsonBody(request);
     try {
-      const listing = await unpublishSkill(vault, body.listingId);
-      sendJson(response, { ok: true, listing });
+      const listing = await vault.load("MarketplaceListing", body.listingId);
+      if (!listing) throw new Error("Listing not found");
+      const userContext = contextFromRequest(request);
+      if (userContext && !canEdit(listing, userContext)) {
+        sendJson(response, { error: "Permission denied: you cannot unpublish this listing" }, 403);
+        return;
+      }
+      if (listing.status === "suspended") throw new Error("cannot unpublish a suspended listing");
+      const result = await unpublishSkill(vault, body.listingId);
+      sendJson(response, { ok: true, listing: result });
     } catch (error) {
       sendJson(response, { error: error.message }, 400);
     }
@@ -737,8 +973,15 @@ async function handleApi(request, url, response) {
   if (url.pathname === "/api/marketplace/suspend" && request.method === "POST") {
     const body = await readJsonBody(request);
     try {
-      const listing = await suspendListing(vault, body.listingId);
-      sendJson(response, { ok: true, listing });
+      const listing = await vault.load("MarketplaceListing", body.listingId);
+      if (!listing) throw new Error("Listing not found");
+      const userContext = contextFromRequest(request);
+      if (userContext && userContext.role !== "admin") {
+        sendJson(response, { error: "Permission denied: only admins can suspend listings" }, 403);
+        return;
+      }
+      const result = await suspendListing(vault, body.listingId);
+      sendJson(response, { ok: true, listing: result });
     } catch (error) {
       sendJson(response, { error: error.message }, 400);
     }
@@ -927,6 +1170,13 @@ async function handleApi(request, url, response) {
   if (url.pathname === "/api/transaction/refund" && request.method === "POST") {
     const body = await readJsonBody(request);
     try {
+      const tx = await getTransaction(vault, body.transactionId);
+      if (!tx) throw new Error("Transaction not found");
+      const userContext = contextFromRequest(request);
+      if (userContext && userContext.role !== "admin" && tx.buyerId !== userContext.userId && tx.sellerId !== userContext.userId) {
+        sendJson(response, { error: "Permission denied: only the buyer, seller, or admin can refund" }, 403);
+        return;
+      }
       const transaction = await refundTransaction(vault, body.transactionId);
       sendJson(response, { ok: true, transaction });
     } catch (error) {
@@ -1001,6 +1251,14 @@ async function handleApi(request, url, response) {
   });
 }
 
+function requireWorkspaceEosDir() {
+  const eosDir = path.dirname(vault.rootDir);
+  if (path.basename(eosDir) !== ".eos" || path.basename(vault.rootDir) !== "vault") {
+    throw new Error("strict capture permits require a bootstrapped workspace Vault");
+  }
+  return eosDir;
+}
+
 async function handleReviewDecision(request) {
   const body = await readJsonBody(request);
   const packetId = body.reviewPacketId;
@@ -1018,7 +1276,7 @@ async function handleReviewDecision(request) {
 
   // Access control: check if user can review this packet
   const userContext = contextFromRequest(request);
-  if (userContext && !canEdit(packet, userContext)) {
+  if (userContext && !canReview(packet, userContext)) {
     return { error: "Permission denied: you cannot review this packet" };
   }
 
@@ -1086,11 +1344,22 @@ async function handleWallHitResolution(request) {
 const MAX_BODY_BYTES = 1024 * 1024; // 1 MiB cap for JSON request bodies
 
 async function readJsonBody(request) {
+  // Validate Content-Type for POST/PUT requests with a body
+  const method = request.method?.toUpperCase();
+  if (method === "POST" || method === "PUT" || method === "PATCH") {
+    const contentType = request.headers["content-type"] || "";
+    if (!contentType.includes("application/json")) {
+      const error = new Error("Content-Type must be application/json");
+      error.statusCode = 415;
+      throw error;
+    }
+  }
   const chunks = [];
   let total = 0;
   for await (const chunk of request) {
     total += chunk.length;
     if (total > MAX_BODY_BYTES) {
+      request.destroy();
       const error = new Error(`Request body exceeds ${MAX_BODY_BYTES} byte limit`);
       error.statusCode = 413;
       throw error;
@@ -1101,8 +1370,8 @@ async function readJsonBody(request) {
   if (!raw.trim()) return {};
   try {
     const parsed = JSON.parse(raw);
-    // Guard against valid-but-null JSON bodies (e.g. "null")
-    return parsed !== null && typeof parsed === "object" ? parsed : {};
+    // Guard against valid-but-null JSON bodies (e.g. "null") and arrays
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
   } catch (error) {
     error.statusCode = 400;
     throw error;
@@ -1153,6 +1422,8 @@ async function buildSummary() {
     "DecisionReceipt",
     "OutcomeRecord",
     "ExperienceAsset",
+    "ExperienceReuseTrial",
+    "BetaFeedback",
     "WorkCheckpoint"
   ];
   const entries = await Promise.all(kinds.map(async (kind) => [kind, await vault.list(kind)]));
@@ -1289,9 +1560,14 @@ function sendJson(response, value, status = 200) {
 }
 
 function send(response, status, body, contentType) {
+  if (response.writableEnded || response.destroyed) return;
   response.writeHead(status, {
     "content-type": contentType,
-    "cache-control": "no-store"
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()"
   });
   response.end(body);
 }

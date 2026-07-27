@@ -1,0 +1,15 @@
+{
+  "id": "capture_permit.1784453975571.129414fc9e",
+  "status": "rejected",
+  "projectId": "project.trae_work_eos_u63a5u5165u8bd5u9a8c",
+  "actor": "codex",
+  "sourceTool": "codex",
+  "sourceRef": null,
+  "title": "Strict permit UI smoke test",
+  "notes": "",
+  "contentPreview": "Strict permit UI smoke test. This text must remain outside the Vault until approved.",
+  "contentHash": "69eb090147cdbd6cb530f6707f69029ee92917fbb92a32fd0ffc7776404c9982",
+  "requestedAt": "2026-07-19T09:39:35.571Z",
+  "rejectedBy": "EOS smoke test cleanup",
+  "rejectedAt": "2026-07-19T09:43:42.542Z"
+}

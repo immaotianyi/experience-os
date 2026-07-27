@@ -205,11 +205,10 @@ npm run web
 - ✅ WallHit 升级为 v2 可读格式（impact/evidence/options/acceptanceCriteria/replaySteps/severity）
 - ✅ React 默认入口改为“项目”：可创建项目、记录 EvidenceLink、生成 Experience Receipt，并在线性时间线中审视来源与沉淀结果
 
-阶段 0 待完成：
+阶段 0 的工程主线已完成；真实 Alpha 验证仍需要人类投入：
 
-- 接入真实 LLM 的受控 Alpha（设置 `OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY` 环境变量）
-- 创建评估任务回归集
-- 邀请首批用户试用主闭环
+- 配置一个真实 LLM 提供商（`LLM_PROVIDER=openai` + `OPENAI_API_KEY`、`LLM_PROVIDER=deepseek` + `DEEPSEEK_API_KEY`，或 `LLM_PROVIDER=anthropic` + `ANTHROPIC_API_KEY`）
+- 创建评估任务回归集并邀请首批用户试用主闭环
 
 完整路线图见 `outputs/Experience_OS_3.0_可用性与可信自治路线图.md`。
 
@@ -242,6 +241,18 @@ npm run relay:mcp
 ```
 
 Relay 对外只暴露四个有限工具：捕获已同意的协作片段、读取项目升级资格、读取已验证经验、读取证据时间线。它不能替人批准决策或提升资产状态。
+
+外部捕获默认是严格许可：Agent 先在本地发起内容预览申请，人类审阅后签发五分钟、一次性且绑定内容哈希的许可，Relay 才能写入 Vault。工作台会保留许可状态与已捕获记录的回指；未配置真实模型时，AI 草案生成默认锁定，不会把 Mock 输出伪装为真实模型结论。仅做离线演练时可显式设置 `EOS_ALLOW_MOCK_DRAFTS=1`，并且所有这类草案都会显示为“离线演练”。
+
+## 真实 Alpha 证据检查
+
+对已 Bootstrap 的工作区运行：
+
+```bash
+npm run alpha:evidence -- /你的/项目目录
+```
+
+该命令只读取该工作区的 `.eos/vault/`，报告许可捕获、真实模型与离线演练草案的区分、人工审查、结果验证和复用反馈。它不会扫描业务文件，也不会用记录数量伪造“产品已产生价值”的结论。
 
 ## 当前复用策略
 

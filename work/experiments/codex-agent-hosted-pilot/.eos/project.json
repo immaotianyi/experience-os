@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "projectId": "project.codex_agent_hosted_pilot",
+  "workspace": "/Users/sanzhaibanniang/Documents/Codex/2026-07-16/gemini-3-1-pro/work/experiments/codex-agent-hosted-pilot",
+  "vaultDir": "/Users/sanzhaibanniang/Documents/Codex/2026-07-16/gemini-3-1-pro/work/experiments/codex-agent-hosted-pilot/.eos/vault",
+  "createdAt": "2026-07-26T09:12:24.724Z",
+  "capture": {
+    "defaultConsent": false,
+    "storage": "local",
+    "policy": "strict_permit"
+  }
+}

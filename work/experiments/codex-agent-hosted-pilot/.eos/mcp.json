@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "experience-os": {
+      "command": "/Users/sanzhaibanniang/.nvm/versions/node/v24.14.0/bin/node",
+      "args": [
+        "/Users/sanzhaibanniang/Documents/Codex/2026-07-16/gemini-3-1-pro/src/eosRelayMcp.js"
+      ],
+      "env": {
+        "EOS_VAULT_DIR": "/Users/sanzhaibanniang/Documents/Codex/2026-07-16/gemini-3-1-pro/work/experiments/codex-agent-hosted-pilot/.eos/vault",
+        "EOS_CAPTURE_POLICY": "strict_permit"
+      }
+    }
+  }
+}

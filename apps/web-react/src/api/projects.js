@@ -1,6 +1,7 @@
 import { getJson, postJson } from "./client.js";
 
 export const fetchProjects = () => getJson("/api/projects");
+export const fetchLLMStatus = () => getJson("/api/llm/status");
 export const fetchProjectTimeline = (projectId) =>
   getJson(`/api/project/timeline?id=${encodeURIComponent(projectId)}`);
 export const createProject = (body) => postJson("/api/projects", body);
@@ -10,12 +11,21 @@ export const fetchExperienceReceiptDrafts = (projectId) => getJson(`/api/experie
 export const createExperienceReceiptDraft = (body) => postJson("/api/experience-receipt-drafts", body);
 export const acceptExperienceReceiptDraft = (body) => postJson("/api/experience-receipt-drafts/accept", body);
 export const rejectExperienceReceiptDraft = (body) => postJson("/api/experience-receipt-drafts/reject", body);
+export const deferExperienceReceiptDraft = (body) => postJson("/api/experience-receipt-drafts/defer", body);
+export const resumeExperienceReceiptDraft = (body) => postJson("/api/experience-receipt-drafts/resume", body);
 export const createDecision = (body) => postJson("/api/decisions", body);
 export const createOutcome = (body) => postJson("/api/outcomes", body);
 export const captureRelayEvent = (body) => postJson("/api/relay/events", body);
 export const captureWorkCheckpoint = (body) => postJson("/api/work-checkpoints", body);
 export const fetchReadiness = (projectId) => getJson(`/api/project/readiness?id=${encodeURIComponent(projectId)}`);
+export const fetchProjectTrialEvidence = (projectId) => getJson(`/api/project/trial-evidence?id=${encodeURIComponent(projectId)}`);
 export const promoteExperienceAsset = (body) => postJson("/api/experience-assets", body);
 export const fetchExperienceAssets = (projectId) => getJson(`/api/experience-assets?projectId=${encodeURIComponent(projectId)}`);
 export const fetchReuseSuggestions = (projectId) => getJson(`/api/reuse-suggestions?projectId=${encodeURIComponent(projectId)}`);
 export const recordReuseFeedback = (body) => postJson("/api/reuse-feedback", body);
+export const fetchExperienceReuseTrials = (projectId) => getJson(`/api/experience-reuse-trials?projectId=${encodeURIComponent(projectId)}`);
+export const startExperienceReuseTrial = (body) => postJson("/api/experience-reuse-trials", body);
+export const completeExperienceReuseTrial = (body) => postJson("/api/experience-reuse-trials/complete", body);
+export const fetchCapturePermitRequests = (projectId) => getJson(`/api/capture-permits?projectId=${encodeURIComponent(projectId)}`);
+export const approveCapturePermitRequest = (body) => postJson("/api/capture-permits/approve", body);
+export const rejectCapturePermitRequest = (body) => postJson("/api/capture-permits/reject", body);

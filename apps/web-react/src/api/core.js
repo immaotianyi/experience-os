@@ -4,6 +4,7 @@
 import { getJson, postJson } from "./client.js";
 
 export const fetchSummary = () => getJson("/api/summary");
+export const fetchAttention = () => getJson("/api/attention");
 export const fetchValidation = () => getJson("/api/validation");
 export const fetchVaultMaintenance = () => getJson("/api/vault-maintenance");
 export const archiveVault = () => postJson("/api/vault-archive", {});

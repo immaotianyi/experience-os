@@ -56,14 +56,14 @@ export async function bootstrapWorkspace({ workspaceDir, name = null, goal = nul
     workspace,
     vaultDir,
     createdAt: new Date().toISOString(),
-    capture: { defaultConsent: false, storage: "local" }
+    capture: { defaultConsent: false, storage: "local", policy: "strict_permit" }
   };
   const mcpConfig = {
     mcpServers: {
       "experience-os": {
         command: process.execPath,
         args: [relayScript],
-        env: { EOS_VAULT_DIR: vaultDir }
+        env: { EOS_VAULT_DIR: vaultDir, EOS_CAPTURE_POLICY: "strict_permit" }
       }
     }
   };
@@ -74,18 +74,27 @@ This directory is EOS's visible local memory and governance boundary for this wo
 - **Project ID:** \`${projectId}\`
 - **Storage:** local Git-backed Vault in \`vault/\`
 - **Default autonomy:** \`advise\`
-- **Capture:** explicit consent only; EOS does not silently observe your applications.
+- **Capture:** strict human permit required for MCP capture; EOS does not silently observe your applications.
 
 ## MCP connection
 
 Use \`mcp.json\` as the server definition in an MCP-compatible client. The relay exposes:
 
 - \`eos_capture_collaboration\` — capture one explicitly consented fragment
+- \`eos_prepare_capture_permit\` — request a human review before strict capture
 - \`eos_project_readiness\` — see what blocks promotion
 - \`eos_verified_experience\` — retrieve approved experience assets
 - \`eos_project_timeline\` — read the evidence-first timeline
 
 The workspace's business files are untouched. You may delete \`.eos/\` to remove this local EOS installation.
+
+## Local workbench
+
+From the EOS source directory, run:
+
+\`npm run workbench -- "${workspace}" 4180\`
+
+This opens the same workbench against this workspace's local Vault only. It does not mix this project's records with EOS's default Vault.
 `;
 
   await Promise.all([

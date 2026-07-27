@@ -20,11 +20,23 @@ const PRICING_OPTIONS = ["", "free", "one_time", "subscription"];
 function ListingCard({ listing, onOpen }) {
   const avg = listing.averageRating ? listing.averageRating.toFixed(1) : "—";
   const priceLabel = listing.pricing?.model === "free" ? "免费" :
-    listing.pricing?.model === "one_time" ? `¥${listing.pricing.price}` :
-    listing.pricing?.model === "subscription" ? `¥${listing.pricing.price}/月` : "—";
+    listing.pricing?.model === "one_time" ? `¥${listing.pricing?.price ?? 0}` :
+    listing.pricing?.model === "subscription" ? `¥${listing.pricing?.price ?? 0}/月` : "—";
 
   return (
-    <div className="record-card" onClick={() => onOpen(listing)}>
+    <div
+      className="record-card"
+      role="button"
+      tabIndex={0}
+      aria-label={`${listing.skillName || listing.skillId}（${priceLabel}）`}
+      onClick={() => onOpen(listing)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen(listing);
+        }
+      }}
+    >
       <header>
         <div>
           <h3>{listing.skillName || listing.skillId}</h3>
@@ -110,9 +122,13 @@ function ListingDetail({ listing, toast }) {
       toast("评分已提交", "ok");
       setRatingScore(0);
       setRatingReview("");
-      // Refresh ratings
-      const updated = await fetchRatings(listing.skillId);
-      setRatings(updated);
+      // Refresh ratings — failure here doesn't mean the rating wasn't submitted
+      try {
+        const updated = await fetchRatings(listing.skillId);
+        setRatings(updated);
+      } catch (refreshErr) {
+        toast("评分已提交，但刷新评价列表失败", "warn");
+      }
     } catch (err) {
       toast(err.message, "bad", "评分失败");
     } finally {
@@ -166,9 +182,9 @@ function ListingDetail({ listing, toast }) {
           </div>
           {breakdown && (
             <div style={{ marginTop: "8px", padding: "10px", background: "var(--panel-2)", fontSize: "12px" }}>
-              <div>总价: ¥{breakdown.gross?.toFixed(2)}</div>
-              <div>平台抽成 (15%): ¥{breakdown.platformCommission?.toFixed(2)}</div>
-              <div>作者净收入: ¥{breakdown.authorNet?.toFixed(2)}</div>
+              <div>总价: ¥{breakdown.gross?.toFixed(2) ?? "0.00"}</div>
+              <div>平台抽成 (15%): ¥{breakdown.platformCommission?.toFixed(2) ?? "0.00"}</div>
+              <div>作者净收入: ¥{breakdown.authorNet?.toFixed(2) ?? "0.00"}</div>
             </div>
           )}
         </div>
@@ -321,7 +337,9 @@ export default function MarketplaceView({ openDrawer, refreshKey, toast }) {
       </div>
 
       {/* Results grid */}
-      {listings.length === 0 ? (
+      {searching ? (
+        <div className="skeleton" style={{ height: "100px" }}>搜索中...</div>
+      ) : listings.length === 0 ? (
         <div className="empty-guide">
           <h3>暂无市场 listing</h3>
           <p>发布一个 stable Skill 到市场即可在此显示。</p>
