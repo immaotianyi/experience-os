@@ -70,7 +70,7 @@ before(async () => {
     reviewPacketId: "review_packet.e2e_rp1",
     targetKind: "Skill",
     targetId: skillId,
-    decision: "promote_to_stable",
+    decision: "promote_stable",
     rationale: "production ready",
     resultingStatus: "stable"
   });

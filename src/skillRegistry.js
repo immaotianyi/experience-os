@@ -52,7 +52,7 @@ export async function buildLocalIndex(vault) {
       }
       const rate = approvalRate.get(key);
       rate.total += 1;
-      if (rd.decision === "approve_candidate" || rd.decision === "promote_to_stable") {
+      if (rd.decision === "approve_candidate" || rd.decision === "promote_stable") {
         rate.approved += 1;
       }
     }
@@ -85,8 +85,10 @@ export async function buildLocalIndex(vault) {
       reviewCount: reviews,
       approvalRate: Math.round(approvalPct * 100),
       usageCount: usage,
-      qualityScore: computeQualityScore({ reviews, approvalPct, usage }),
-      qualityGrade: computeQualityGrade(computeQualityScore({ reviews, approvalPct, usage })),
+      ...(() => {
+        const score = computeQualityScore({ reviews, approvalPct, usage });
+        return { qualityScore: score, qualityGrade: computeQualityGrade(score) };
+      })(),
       mcpExportable: skill.status === "stable",
       createdAt: skill.createdAt,
       updatedAt: skill.updatedAt,
@@ -221,7 +223,7 @@ export async function getSkillMetadata(vault, skillId) {
   );
 
   const approved = reviewDecisions.filter(
-    (rd) => rd.decision === "approve_candidate" || rd.decision === "promote_to_stable"
+    (rd) => rd.decision === "approve_candidate" || rd.decision === "promote_stable"
   ).length;
 
   const gitHistory = vault.history(skillId);

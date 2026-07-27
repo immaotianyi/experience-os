@@ -188,7 +188,7 @@ describe("finalizeTeamReview", () => {
     await vault.save(packet);
 
     const { decision } = await finalizeTeamReview({ packet, vault });
-    assert.equal(decision.decision, "reject_candidate");
+    assert.equal(decision.decision, "reject");
     assert.equal(decision.resultingStatus, "rejected");
   });
 

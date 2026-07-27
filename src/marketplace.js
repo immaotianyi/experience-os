@@ -326,7 +326,9 @@ export async function syncListingRatings(vault, skillId) {
     const ratingCount = ratings.length;
 
     const listings = await vault.list("MarketplaceListing");
-    const forSkill = listings.filter((l) => l.skillId === skillId);
+    // Only sync ratings to active listings — updating unpublished/suspended
+    // listings would bump their updatedAt and distort "recent" sorting.
+    const forSkill = listings.filter((l) => l.skillId === skillId && l.status === "active");
     for (const listing of forSkill) {
       listing.ratingSum = ratingSum;
       listing.ratingCount = ratingCount;

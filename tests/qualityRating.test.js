@@ -65,7 +65,7 @@ before(async () => {
     reviewPacketId: "review_packet.quality_rp1",
     targetKind: "Skill",
     targetId: "skill.quality_stable",
-    decision: "promote_to_stable",
+    decision: "promote_stable",
     rationale: "solid",
     resultingStatus: "stable"
   });

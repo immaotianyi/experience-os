@@ -7,6 +7,7 @@
  */
 
 import { stdin, stdout, stderr } from "node:process";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { GitVault } from "./gitVault.js";
 import { resolveVaultDir } from "./vaultPath.js";
@@ -136,7 +137,7 @@ function textResult(value, isError = false) {
 }
 
 function generatedId(prefix) {
-  return `${prefix}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}`;
+  return `${prefix}.${Date.now()}.${randomBytes(4).toString("hex")}`;
 }
 
 async function callTool(name, args = {}) {
@@ -249,10 +250,17 @@ stdin.on("data", (chunk) => {
         const reply = await handleMessage(JSON.parse(line));
         if (reply) stdout.write(`${JSON.stringify(reply)}\n`);
       } catch (error) {
-        stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: error.message } })}\n`);
+        // Try to extract the original request id for error correlation
+        let requestId = null;
+        try { requestId = JSON.parse(line).id ?? null; } catch { /* not valid JSON */ }
+        stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: requestId, error: { code: -32700, message: error.message } })}\n`);
       }
     }).catch((err) => {
       stderr.write(`[EOS Relay] message processing error: ${err.message}\n`);
     });
   }
 });
+
+// Exit cleanly when stdin closes (MCP client disconnected)
+stdin.on("end", () => process.exit(0));
+stdin.on("close", () => process.exit(0));

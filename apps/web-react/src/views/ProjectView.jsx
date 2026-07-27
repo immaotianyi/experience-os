@@ -56,6 +56,18 @@ function ProjectOption({ project, selected, onSelect }) {
 
 function TimelineItem({ item }) {
   const { record } = item;
+  // Defensive: if record is missing/corrupt, render a minimal placeholder
+  if (!record) {
+    return (
+      <article className="timeline-item">
+        <span className="timeline-kind">{KIND_LABELS[item.kind] || item.kind}</span>
+        <div>
+          <strong className="muted">记录数据缺失</strong>
+          <p className="timeline-time">{item.timestamp ? new Date(item.timestamp).toLocaleString("zh-CN") : ""}</p>
+        </div>
+      </article>
+    );
+  }
   const text = item.kind === "EvidenceLink"
     ? record.title
     : item.kind === "ConversationEvent"
@@ -156,6 +168,12 @@ function DraftReviewCard({ draft, submitting, onAccept, onReject, onDefer }) {
   const [phase, setPhase] = useState(draft.phase);
   const [summary, setSummary] = useState(draft.summary);
   const [reason, setReason] = useState("");
+
+  // Sync local state when draft prop changes (e.g., after timeline refresh)
+  useEffect(() => {
+    setPhase(draft.phase);
+    setSummary(draft.summary);
+  }, [draft.id, draft.updatedAt]);
 
   const confirmEdited = () => {
     if (!phase.trim() || !summary.trim()) return;

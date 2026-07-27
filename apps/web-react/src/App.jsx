@@ -88,6 +88,8 @@ function Workbench() {
       if (e.key === "Escape") { closeDrawer(); return; }
       // Disable view-switching shortcuts when drawer is open
       if (drawerContent) return;
+      // Ignore Cmd/Ctrl+key combos (browser shortcuts like Cmd+R)
+      if (e.metaKey || e.ctrlKey) return;
       const view = VIEWS.find((v) => v.key === e.key);
       if (view) {
         setActiveView(view.id);
@@ -112,7 +114,7 @@ function Workbench() {
     setActiveView(view);
     const url = new URL(window.location.href);
     url.searchParams.set("view", view);
-    window.history.replaceState(null, "", url);
+    window.history.pushState(null, "", url);
     if (anchor) {
       window.setTimeout(() => { window.location.hash = anchor; }, 0);
     }

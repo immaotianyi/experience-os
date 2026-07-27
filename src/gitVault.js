@@ -262,8 +262,9 @@ export class GitVault {
       if (/nothing to commit|no changes added to commit|nothing added to commit/i.test(msg)) {
         return; // Expected when transaction content is identical to HEAD
       }
-      // Real git errors should not be silently swallowed
+      // Real git errors must propagate so withTransaction can rollback
       console.error(`[GitVault] commit failed: ${msg}`);
+      throw new Error(`Git commit failed: ${msg}`);
     }
   }
 

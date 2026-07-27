@@ -66,14 +66,12 @@ export async function processPurchase(vault, { listingId, buyerId, purchaseType 
         throw new Error(`Trial limit reached (${trialStatus.used}/${trialStatus.limit})`);
       }
     } else {
-      // For one_time and subscription models, check if buyer already holds a
-      // license (prevent double charge). Free listings don't need this check
-      // since they cost 0, but we still prevent duplicate license issuance.
-      if (listing.pricing?.model === "one_time" || listing.pricing?.model === "subscription") {
-        const existingLicense = await verifyBuyerLicense(vault, listingId, buyerId);
-        if (existingLicense.hasLicense) {
-          throw new Error(`Buyer ${buyerId} already holds a license for this listing. Use the existing license key: ${existingLicense.licenseKey}`);
-        }
+      // For all non-trial purchases (including free), check if buyer already
+      // holds a license. This prevents duplicate license issuance and inflated
+      // download counts for free listings.
+      const existingLicense = await verifyBuyerLicense(vault, listingId, buyerId);
+      if (existingLicense.hasLicense) {
+        throw new Error(`Buyer ${buyerId} already holds a license for this listing. Use the existing license key: ${existingLicense.licenseKey}`);
       }
     }
 
@@ -162,6 +160,9 @@ export async function refundTransaction(vault, transactionId) {
     }
     if (transaction.status === "refunded") {
       throw new Error("Transaction already refunded");
+    }
+    if (transaction.status !== "completed") {
+      throw new Error(`Cannot refund a transaction with status: ${transaction.status}`);
     }
     if (transaction.type === "trial") {
       throw new Error("Trial transactions cannot be refunded");

@@ -7,7 +7,7 @@ import { getJson } from "../api/client.js";
 
 export function useFetch(url, options = {}) {
   const [data, setData] = useState(options.initial ?? null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!!url);
   const [error, setError] = useState(null);
   const urlRef = useRef(url);
   const abortRef = useRef(null);
@@ -34,6 +34,8 @@ export function useFetch(url, options = {}) {
   }, []);
 
   useEffect(() => {
+    // Reset data when URL changes to prevent stale data flicker
+    setData(options.initial ?? null);
     urlRef.current = url;
     refresh();
     return () => { if (abortRef.current) abortRef.current.abort(); };

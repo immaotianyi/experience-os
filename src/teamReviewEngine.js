@@ -170,7 +170,7 @@ export async function finalizeTeamReview({ packet, vault, finalDecisionBy }) {
   }
 
   // Determine final decision based on votes
-  const finalDecision = status.rejections > 0 ? "reject_candidate" : "approve_candidate";
+  const finalDecision = status.rejections > 0 ? "reject" : "approve_candidate";
   const resultingStatus = status.rejections > 0 ? "rejected" : "candidate_confirmed";
 
   const decision = createReviewDecision({
@@ -198,8 +198,19 @@ export async function finalizeTeamReview({ packet, vault, finalDecisionBy }) {
   packet.decisionId = decision.id;
   packet.updatedAt = nowIso();
 
-  await vault.save(decision);
-  await vault.save(packet);
+  // Save both records atomically — if either fails, the other must not persist
+  const doSave = async () => {
+    await vault.save(decision);
+    await vault.save(packet);
+  };
+
+  if (typeof vault.withTransaction === "function") {
+    await vault.withTransaction(doSave, { message: `[Review] team finalize: ${packet.id}` });
+  } else if (typeof vault.withWriteLock === "function") {
+    await vault.withWriteLock(doSave);
+  } else {
+    await doSave();
+  }
 
   return { decision, packet };
 }

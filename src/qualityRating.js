@@ -198,7 +198,7 @@ export async function getSkillQualityReport(vault, skillId) {
   );
 
   const approved = reviewDecisions.filter(
-    (rd) => rd.decision === "approve_candidate" || rd.decision === "promote_to_stable"
+    (rd) => rd.decision === "approve_candidate" || rd.decision === "promote_stable"
   ).length;
   const approvalPct = reviewDecisions.length > 0 ? approved / reviewDecisions.length : 0;
 
@@ -262,16 +262,28 @@ export async function autoFlagLowQuality(vault) {
   const stable = skills.filter((s) => s.status === "stable");
 
   const flagged = [];
-  for (const skill of stable) {
-    const report = await getSkillQualityReport(vault, skill.id);
-    if (report && report.shouldFlag) {
-      skill.status = "needs_revision";
-      skill.promotionGate = "quality_below_threshold";
-      skill.updatedAt = new Date().toISOString();
-      await vault.save(skill);
-      flagged.push({ skillId: skill.id, skillName: skill.name, score: report.score, grade: report.grade });
+
+  const doFlag = async () => {
+    for (const skill of stable) {
+      const report = await getSkillQualityReport(vault, skill.id);
+      if (report && report.shouldFlag) {
+        skill.status = "needs_revision";
+        skill.promotionGate = "quality_below_threshold";
+        skill.updatedAt = new Date().toISOString();
+        await vault.save(skill);
+        flagged.push({ skillId: skill.id, skillName: skill.name, score: report.score, grade: report.grade });
+      }
     }
+  };
+
+  if (typeof vault.withTransaction === "function") {
+    await vault.withTransaction(doFlag, { message: "[Quality] auto-flag low quality" });
+  } else if (typeof vault.withWriteLock === "function") {
+    await vault.withWriteLock(doFlag);
+  } else {
+    await doFlag();
   }
+
   return flagged;
 }
 

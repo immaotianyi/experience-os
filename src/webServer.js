@@ -289,17 +289,20 @@ async function handleApi(request, url, response) {
 
   // Support both singular and plural paths for backward compatibility
   if (request.method === "POST" && (url.pathname === "/api/review-decisions" || url.pathname === "/api/review-decision")) {
-    sendJson(response, await handleReviewDecision(request));
+    const result = await handleReviewDecision(request);
+    sendJson(response, result, result.error ? 400 : 200);
     return;
   }
 
   if (request.method === "POST" && url.pathname === "/api/vault-archive") {
-    sendJson(response, await handleVaultArchive(request));
+    const result = await handleVaultArchive(request);
+    sendJson(response, result, result.error ? 400 : 200);
     return;
   }
 
   if (request.method === "POST" && (url.pathname === "/api/wallhit-resolutions" || url.pathname === "/api/wallhit-resolution")) {
-    sendJson(response, await handleWallHitResolution(request));
+    const result = await handleWallHitResolution(request);
+    sendJson(response, result, result.error ? 400 : 200);
     return;
   }
 
@@ -1396,7 +1399,7 @@ async function readJsonBody(request) {
   const method = request.method?.toUpperCase();
   if (method === "POST" || method === "PUT" || method === "PATCH") {
     const contentType = request.headers["content-type"] || "";
-    if (!contentType.includes("application/json")) {
+    if (!contentType.toLowerCase().includes("application/json")) {
       const error = new Error("Content-Type must be application/json");
       error.statusCode = 415;
       throw error;
@@ -1615,7 +1618,8 @@ function send(response, status, body, contentType) {
     "x-content-type-options": "nosniff",
     "x-frame-options": "DENY",
     "referrer-policy": "no-referrer",
-    "permissions-policy": "camera=(), microphone=(), geolocation=()"
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
   });
   response.end(body);
 }

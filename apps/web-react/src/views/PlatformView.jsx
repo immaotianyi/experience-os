@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useFetch } from "../hooks/useFetch.js";
 import { startPlatform } from "../api/platform.js";
 
@@ -93,7 +93,7 @@ function PlatformCard({ name, result, onStart }) {
         </div>
 
         {expanded && result?.instructions && (
-          <pre style={{ marginTop: "10px", padding: "10px", background: "var(--surface-2)", fontSize: "12px", whiteSpace: "pre-wrap", borderRadius: "4px", overflowX: "auto" }}>
+          <pre style={{ marginTop: "10px", padding: "10px", background: "var(--panel-2)", fontSize: "12px", whiteSpace: "pre-wrap", borderRadius: "4px", overflowX: "auto" }}>
             {result.instructions}
           </pre>
         )}
@@ -105,13 +105,19 @@ function PlatformCard({ name, result, onStart }) {
 export default function PlatformView({ refreshKey, toast }) {
   const url = `/api/platforms?t=${refreshKey}`;
   const { data, loading, error, refresh } = useFetch(url);
+  const refreshTimerRef = useRef(null);
 
   const platforms = data?.platforms || {};
   const summary = data?.summary || {};
 
-  const handleStart = () => {
-    setTimeout(refresh, 500);
-  };
+  const handleStart = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(refresh, 500);
+  }, [refresh]);
+
+  useEffect(() => {
+    return () => { if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current); };
+  }, []);
 
   return (
     <>
