@@ -240,10 +240,11 @@ async function handleApi(request, url, response) {
       sendJson(response, { error: "Too many feedback submissions. Please try again later." }, 429);
       return;
     }
-    attempts.push(now);
-    betaFeedbackAttempts.set(address, attempts);
     try {
       const feedback = await submitBetaFeedback(vault, await readJsonBody(request));
+      // Only count successful submissions toward the rate limit
+      attempts.push(now);
+      betaFeedbackAttempts.set(address, attempts);
       sendJson(response, { ok: true, id: feedback.id }, 201);
     } catch (error) {
       sendJson(response, { error: error.message }, 400);

@@ -181,8 +181,13 @@ export class GitVault {
       try {
         git(["add", relPath], this.rootDir);
         git(["commit", "--no-gpg-sign", "-m", message], this.rootDir);
-      } catch {
-        // Commit may fail if nothing changed — that's fine
+      } catch (error) {
+        const msg = String(error?.stderr || error?.message || "");
+        if (/nothing to commit|no changes added to commit|nothing added to commit/i.test(msg)) {
+          // Expected when record content is identical to HEAD
+        } else {
+          console.error(`[GitVault] saveUnlocked commit failed: ${msg}`);
+        }
       }
     }
 
@@ -229,14 +234,18 @@ export class GitVault {
   async rollbackTransaction() {
     const snapshots = [...this.transaction.snapshots.entries()].reverse();
     for (const [filePath, original] of snapshots) {
-      if (original === null) {
-        await rm(filePath, { force: true });
-        continue;
+      try {
+        if (original === null) {
+          await rm(filePath, { force: true });
+          continue;
+        }
+        await mkdir(path.dirname(filePath), { recursive: true });
+        const tempPath = `${filePath}.rollback-${process.pid}-${Date.now()}`;
+        await writeFile(tempPath, original);
+        await rename(tempPath, filePath);
+      } catch (error) {
+        console.error(`[GitVault] rollback failed for ${filePath}: ${error.message}`);
       }
-      await mkdir(path.dirname(filePath), { recursive: true });
-      const tempPath = `${filePath}.rollback-${process.pid}-${Date.now()}`;
-      await writeFile(tempPath, original);
-      await rename(tempPath, filePath);
     }
   }
 

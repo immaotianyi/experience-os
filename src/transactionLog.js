@@ -252,11 +252,13 @@ export async function getRevenueSummary(vault, sellerId) {
     trial: transactions.filter((t) => t.sellerId === sellerId && t.type === "trial").length
   };
 
-  // Top earning skills
+  // Top earning skills — revenue uses gross (t.amount) to match totalRevenue;
+  // netRevenue provides the net (post-commission) figure for display.
   const bySkill = new Map();
   for (const t of sellerTx) {
-    const entry = bySkill.get(t.skillId) || { skillId: t.skillId, revenue: 0, count: 0 };
-    entry.revenue += t.netToSeller || 0;
+    const entry = bySkill.get(t.skillId) || { skillId: t.skillId, revenue: 0, netRevenue: 0, count: 0 };
+    entry.revenue += t.amount || 0;
+    entry.netRevenue += t.netToSeller || 0;
     entry.count += 1;
     bySkill.set(t.skillId, entry);
   }
@@ -273,7 +275,8 @@ export async function getRevenueSummary(vault, sellerId) {
     byType,
     topSkills: topSkills.map((s) => ({
       ...s,
-      revenue: Math.round(s.revenue * 100) / 100
+      revenue: Math.round(s.revenue * 100) / 100,
+      netRevenue: Math.round(s.netRevenue * 100) / 100
     }))
   };
 }

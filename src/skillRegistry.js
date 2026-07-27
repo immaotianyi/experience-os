@@ -163,6 +163,16 @@ export function searchIndex(index, options = {}) {
  * @returns {Promise<Object>} The created candidate Skill record
  */
 export async function importSkill({ vault, skillData, projectId, source = "external" }) {
+  if (!skillData || typeof skillData !== "object" || Array.isArray(skillData)) {
+    throw new Error("skillData must be a non-null object");
+  }
+  if (typeof skillData.name !== "string" || !skillData.name.trim()) {
+    throw new Error("skillData.name must be a non-empty string");
+  }
+  if (typeof projectId !== "string" || !projectId.trim()) {
+    throw new Error("projectId is required and must be a non-empty string");
+  }
+
   const { createSkillCandidate } = await import("./domain.js");
 
   const id = `skill.imported.${slug(skillData.name)}.${Date.now()}`;
