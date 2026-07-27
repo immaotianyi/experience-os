@@ -9,8 +9,8 @@ export const fetchLeaderboard = (limit = 10) =>
 export const fetchQualityReport = (skillId) =>
   getJson(`/api/quality/report?skillId=${encodeURIComponent(skillId)}`);
 
-export const fetchRatings = (skillId) =>
-  getJson(`/api/quality/ratings?skillId=${encodeURIComponent(skillId)}`);
+export const fetchRatings = (skillId, { signal } = {}) =>
+  getJson(`/api/quality/ratings?skillId=${encodeURIComponent(skillId)}`, { signal });
 
 export const submitRating = (body) => postJson("/api/quality/rate", body);
 

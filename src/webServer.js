@@ -184,7 +184,7 @@ function clampLimit(value, fallback = 24) {
  * Never leaks stack traces — returns a generic message for 500 errors.
  */
 function safeErrorMessage(error) {
-  if (error.statusCode === 400 || error.statusCode === 413) {
+  if (error.statusCode === 400 || error.statusCode === 413 || error.statusCode === 415) {
     return error.message;
   }
   if (error.code === "ENOENT") return "Not found";
@@ -858,14 +858,15 @@ async function handleApi(request, url, response) {
       sendJson(response, { error: "packetId and userIds are required" }, 400);
       return;
     }
-    const packet = await vault.load("ReviewPacket", body.packetId).catch(() => null);
-    if (!packet) {
-      sendJson(response, { error: "ReviewPacket not found" }, 404);
-      return;
-    }
-    assignReviewers(packet, body.userIds);
-    await vault.save(packet);
-    sendJson(response, { ok: true, packet });
+    const doAssign = async () => {
+      const fresh = await vault.load("ReviewPacket", body.packetId).catch(() => null);
+      if (!fresh) return { error: "ReviewPacket not found", status: 404 };
+      assignReviewers(fresh, body.userIds);
+      await vault.save(fresh);
+      return { ok: true, packet: fresh };
+    };
+    const result = typeof vault.withWriteLock === "function" ? await vault.withWriteLock(doAssign) : await doAssign();
+    sendJson(response, result, result.status ?? 200);
     return;
   }
 
@@ -875,19 +876,20 @@ async function handleApi(request, url, response) {
       sendJson(response, { error: "packetId, userId, and vote are required" }, 400);
       return;
     }
-    const packet = await vault.load("ReviewPacket", body.packetId).catch(() => null);
-    if (!packet) {
-      sendJson(response, { error: "ReviewPacket not found" }, 404);
-      return;
-    }
-    try {
-      submitVote(packet, { userId: body.userId, vote: body.vote, comment: body.comment });
-      await vault.save(packet);
-      const status = checkConfirmationStatus(packet);
-      sendJson(response, { ok: true, packet, status });
-    } catch (error) {
-      sendJson(response, { error: error.message }, 400);
-    }
+    const doVote = async () => {
+      const fresh = await vault.load("ReviewPacket", body.packetId).catch(() => null);
+      if (!fresh) return { error: "ReviewPacket not found", status: 404 };
+      try {
+        submitVote(fresh, { userId: body.userId, vote: body.vote, comment: body.comment });
+        await vault.save(fresh);
+        const status = checkConfirmationStatus(fresh);
+        return { ok: true, packet: fresh, status };
+      } catch (error) {
+        return { error: error.message, status: 400 };
+      }
+    };
+    const result = typeof vault.withWriteLock === "function" ? await vault.withWriteLock(doVote) : await doVote();
+    sendJson(response, result, result.status ?? 200);
     return;
   }
 
@@ -897,14 +899,15 @@ async function handleApi(request, url, response) {
       sendJson(response, { error: "packetId, userId, and message are required" }, 400);
       return;
     }
-    const packet = await vault.load("ReviewPacket", body.packetId).catch(() => null);
-    if (!packet) {
-      sendJson(response, { error: "ReviewPacket not found" }, 404);
-      return;
-    }
-    addDiscussionComment(packet, { userId: body.userId, message: body.message, mentions: body.mentions });
-    await vault.save(packet);
-    sendJson(response, { ok: true, discussion: packet.discussion });
+    const doDiscuss = async () => {
+      const fresh = await vault.load("ReviewPacket", body.packetId).catch(() => null);
+      if (!fresh) return { error: "ReviewPacket not found", status: 404 };
+      addDiscussionComment(fresh, { userId: body.userId, message: body.message, mentions: body.mentions });
+      await vault.save(fresh);
+      return { ok: true, discussion: fresh.discussion };
+    };
+    const result = typeof vault.withWriteLock === "function" ? await vault.withWriteLock(doDiscuss) : await doDiscuss();
+    sendJson(response, result, result.status ?? 200);
     return;
   }
 
@@ -1127,8 +1130,12 @@ async function handleApi(request, url, response) {
   }
 
   if (url.pathname === "/api/pricing/commission" && request.method === "GET") {
-    const amount = Number(url.searchParams.get("amount") ?? 0);
-    const split = calculateCommission(amount);
+    const rawAmount = Number(url.searchParams.get("amount") ?? 0);
+    if (!Number.isFinite(rawAmount) || rawAmount < 0) {
+      sendJson(response, { error: "amount must be a non-negative finite number" }, 400);
+      return;
+    }
+    const split = calculateCommission(rawAmount);
     sendJson(response, split);
     return;
   }
@@ -1298,6 +1305,9 @@ async function handleReviewDecision(request) {
   }
 
   const packet = await vault.load("ReviewPacket", packetId);
+  if (!packet) {
+    return { error: "ReviewPacket not found", reviewPacketId: packetId };
+  }
   if (packet.status === "decided") {
     return { error: "ReviewPacket is already decided", packet };
   }
@@ -1346,27 +1356,36 @@ async function handleWallHitResolution(request) {
     return { error: "wallHitId is required" };
   }
 
-  const wallHit = await vault.load("WallHit", wallHitId);
-
   // Access control: check if user can edit this wall hit
   const userContext = contextFromRequest(request);
-  if (userContext && !canEdit(wallHit, userContext)) {
-    return { error: "Permission denied: you cannot resolve this wall hit" };
-  }
-
   const resolvedAt = new Date().toISOString();
-  const resolvedByIds = [...new Set([...(wallHit.resolvedByIds ?? []), ...(body.resolvedByIds ?? [])].filter(Boolean))];
-  const updatedWallHit = {
-    ...wallHit,
-    status: "resolved",
-    humanDecisionNeeded: false,
-    resolvedByIds,
-    resolvedAt,
-    resolutionRationale: body.rationale ?? "human marked resolved",
-    updatedAt: resolvedAt
+
+  const doResolve = async () => {
+    const fresh = await vault.load("WallHit", wallHitId);
+    if (!fresh) {
+      return { error: "WallHit not found", wallHitId };
+    }
+    if (userContext && !canEdit(fresh, userContext)) {
+      return { error: "Permission denied: you cannot resolve this wall hit" };
+    }
+    const resolvedByIds = [...new Set([...(fresh.resolvedByIds ?? []), ...(body.resolvedByIds ?? [])].filter(Boolean))];
+    const updatedWallHit = {
+      ...fresh,
+      status: "resolved",
+      humanDecisionNeeded: false,
+      resolvedByIds,
+      resolvedAt,
+      resolutionRationale: body.rationale ?? "human marked resolved",
+      updatedAt: resolvedAt
+    };
+    await vault.save(updatedWallHit);
+    return { ok: true, wallHit: updatedWallHit };
   };
-  await vault.save(updatedWallHit);
-  return { ok: true, wallHit: updatedWallHit };
+
+  if (typeof vault.withWriteLock === "function") {
+    return vault.withWriteLock(doResolve);
+  }
+  return doResolve();
 }
 
 const MAX_BODY_BYTES = 1024 * 1024; // 1 MiB cap for JSON request bodies

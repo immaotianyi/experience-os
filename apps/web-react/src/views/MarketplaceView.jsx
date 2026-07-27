@@ -70,7 +70,11 @@ function ListingDetail({ listing, toast }) {
 
   // Load ratings + breakdown
   useEffect(() => {
-    fetchRatings(listing.skillId).then(setRatings).catch(() => {});
+    const controller = new AbortController();
+    fetchRatings(listing.skillId, { signal: controller.signal })
+      .then(setRatings)
+      .catch(() => {});
+    return () => controller.abort();
   }, [listing.skillId]);
 
   const previewBreakdown = async () => {

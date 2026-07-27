@@ -115,7 +115,7 @@ function SuggestionCard({ item, sourceName, submitting, onFeedback, onAdopt }) {
         <p>{item.summary}</p>
       </div>
       <p className="trust-meta">
-        来自项目「{sourceName}」· {item.reason} 适用边界：{item.applicabilityBounds.join("；") || "未声明"}
+        来自项目「{sourceName}」· {item.reason} 适用边界：{(item.applicabilityBounds || []).join("；") || "未声明"}
       </p>
       {!noteOpen ? (
         <div className="receipt-draft-actions">
@@ -165,13 +165,13 @@ function DraftReviewCard({ draft, submitting, onAccept, onReject, onDefer }) {
   return (
     <article className="trust-draft-card">
       <div>
-        <TrustTag level="draft">{draft.generatedBy.mode === "agent_hosted" ? "当前工具生成·待你确认" : "AI 草案·待你确认"}</TrustTag>
+        <TrustTag level="draft">{draft.generatedBy?.mode === "agent_hosted" ? "当前工具生成·待你确认" : "AI 草案·待你确认"}</TrustTag>
         <strong>{draft.phase}</strong>
         <p>{draft.summary}</p>
       </div>
-      <p className="trust-meta">引用 {draft.checkpointIds.length} 个工作节点、{draft.evidenceLinkIds.length} 条证据 · 模型 {draft.generatedBy.provider}/{draft.generatedBy.model}</p>
-      {draft.generatedBy.mode === "agent_hosted" && <span className="tag accent">由 {draft.generatedBy.sourceTool || draft.generatedBy.provider} 当前会话提交，无需 EOS API Key</span>}
-      {draft.generatedBy.mode === "rehearsal" && <span className="tag warn">离线演练，不是模型质量证据</span>}
+      <p className="trust-meta">引用 {(draft.checkpointIds || []).length} 个工作节点、{(draft.evidenceLinkIds || []).length} 条证据 · 模型 {draft.generatedBy?.provider}/{draft.generatedBy?.model}</p>
+      {draft.generatedBy?.mode === "agent_hosted" && <span className="tag accent">由 {draft.generatedBy?.sourceTool || draft.generatedBy?.provider} 当前会话提交，无需 EOS API Key</span>}
+      {draft.generatedBy?.mode === "rehearsal" && <span className="tag warn">离线演练，不是模型质量证据</span>}
       {draft.generationWarnings?.map((warning) => <p className="timeline-meta" key={warning}>生成警告：{warning}</p>)}
       {draft.uncertainty !== null && draft.uncertainty !== undefined && <span className="tag warn">不确定性 {Math.round(draft.uncertainty * 100)}%</span>}
       {draft.applicabilityBounds?.length > 0 && <p className="timeline-meta">适用边界：{draft.applicabilityBounds.join("；")}</p>}
@@ -726,8 +726,8 @@ export default function ProjectView({ refreshKey, toast }) {
                                 <strong>{draft.phase}</strong>
                                 <p>{truncate(draft.summary, 120)}</p>
                               </div>
-                              <p className="trust-meta">模型 {draft.generatedBy.provider}/{draft.generatedBy.model} · {draft.id}</p>
-                              {draft.generatedBy.mode === "rehearsal" && <span className="tag warn">离线演练</span>}
+                              <p className="trust-meta">模型 {draft.generatedBy?.provider}/{draft.generatedBy?.model} · {draft.id}</p>
+                              {draft.generatedBy?.mode === "rehearsal" && <span className="tag warn">离线演练</span>}
                               {draft.generationWarnings?.map((warning) => <p className="timeline-meta" key={warning}>生成警告：{warning}</p>)}
                               {draft.status === "deferred" && <button className="ghost-btn" type="button" disabled={submitting === `resume-draft-${draft.id}`} onClick={() => resumeDraft(draft)}>恢复审查</button>}
                             </article>
