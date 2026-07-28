@@ -28,9 +28,14 @@ export async function bootstrapWorkspace({ workspaceDir, name = null, goal = nul
   const vaultDir = path.join(eosDir, "vault");
   const projectName = name?.trim() || path.basename(workspace);
   const manifestPath = path.join(eosDir, "project.json");
-  const existingManifest = (await exists(manifestPath))
-    ? JSON.parse(await readFile(manifestPath, "utf8"))
-    : null;
+  let existingManifest = null;
+  if (await exists(manifestPath)) {
+    try {
+      existingManifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    } catch (error) {
+      throw new Error(`Cannot read .eos/project.json: file is corrupted or invalid JSON. Fix or remove it and re-run bootstrap. Details: ${error.message}`);
+    }
+  }
   const projectId = existingManifest?.projectId || `project.${safeIdSlug(projectName, "workspace")}`;
   const projectPath = path.join(vaultDir, "projects", `${projectId}.json`);
 

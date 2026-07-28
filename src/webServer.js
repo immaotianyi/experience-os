@@ -995,8 +995,17 @@ async function handleApi(request, url, response) {
     try {
       const listing = await publishSkill(vault, body);
       if (userContext) {
-        applyOwnership(listing, userContext);
-        await vault.save(listing);
+        // Apply ownership inside the write lock to prevent a race where
+        // another request reads the listing before ownership is attached.
+        const doOwnershipSave = async () => {
+          applyOwnership(listing, userContext);
+          await vault.save(listing);
+        };
+        if (typeof vault.withWriteLock === "function") {
+          await vault.withWriteLock(doOwnershipSave);
+        } else {
+          await doOwnershipSave();
+        }
       }
       sendJson(response, { ok: true, listing });
     } catch (error) {
@@ -1356,8 +1365,17 @@ async function handleReviewDecision(request) {
 
   const reviewDecision = await applyReviewDecision({ vault, packet, decision, rationale });
   if (userContext) {
-    applyOwnership(reviewDecision, userContext);
-    await vault.save(reviewDecision);
+    // Apply ownership inside the write lock to prevent a race where
+    // another request reads the decision before ownership is attached.
+    const doOwnershipSave = async () => {
+      applyOwnership(reviewDecision, userContext);
+      await vault.save(reviewDecision);
+    };
+    if (typeof vault.withWriteLock === "function") {
+      await vault.withWriteLock(doOwnershipSave);
+    } else {
+      await doOwnershipSave();
+    }
   }
   return {
     ok: true,
