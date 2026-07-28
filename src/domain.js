@@ -78,13 +78,23 @@ export const PROJECT_STATUSES = Object.freeze([
 
 // 3.0 Evidence types for EvidenceLink records.
 export const EVIDENCE_TYPES = Object.freeze([
-  "doc",        // documentation, design notes, specs
-  "code",       // source code, diffs, commits
-  "data",       // datasets, metrics, measurements
-  "test",       // test results, coverage reports
-  "feedback",   // user/stakeholder feedback
-  "reference",  // external reference (paper, URL, book)
-  "observation" // observed behavior, logs, traces
+  "doc",         // documentation, design notes, specs
+  "code",        // source code, diffs, commits
+  "data",        // datasets, metrics, measurements
+  "test",        // test results, coverage reports
+  "feedback",    // user/stakeholder feedback
+  "reference",   // external reference (paper, URL, book)
+  "observation", // observed behavior, logs, traces
+  "code-graph"   // code structure graph snapshot (AST/call graph analysis)
+]);
+
+// Code graph pattern types extracted from structural analysis.
+export const CODE_GRAPH_PATTERN_TYPES = Object.freeze([
+  "hub",      // high fan-in node, many dependents
+  "hotspot",  // high fan-out + high complexity, fragile coupling
+  "cycle",    // circular dependency chain
+  "leaf",     // terminal node, no outgoing edges
+  "bridge"    // connects two otherwise disconnected clusters
 ]);
 
 // 3.0 Outcome states for ExperienceReceipt and OutcomeRecord.
@@ -815,6 +825,47 @@ export function createReviewDecision({
     rationale,
     resultingStatus,
     createdAt: nowIso()
+  };
+}
+
+/**
+ * CodeGraphPattern — a structural pattern extracted from code graph analysis.
+ *
+ * 方案C: Each pattern is a vault record that the self-iteration engine
+ * consumes to generate Skills. The pattern carries enough context
+ * (nodeId, metrics, applicabilityBounds) for the Skill to be actionable
+ * without re-parsing the codebase.
+ */
+export function createCodeGraphPattern({
+  id,
+  projectId,
+  sourceSnapshotId,
+  patternType,        // CODE_GRAPH_PATTERN_TYPES
+  nodeId = null,      // primary node for hub/hotspot/leaf/bridge
+  nodeIds = [],       // for cycle patterns (multiple nodes)
+  label,
+  description,
+  metrics = {},       // { fanIn, fanOut, complexity, cycleLength, ... }
+  applicabilityBounds = [],
+  suggestedSkillType = null,
+  capturedAt = null
+}) {
+  return {
+    id,
+    kind: "CodeGraphPattern",
+    projectId,
+    sourceSnapshotId,
+    patternType,
+    nodeId,
+    nodeIds,
+    label,
+    description,
+    metrics,
+    applicabilityBounds,
+    suggestedSkillType,
+    capturedAt: capturedAt ?? nowIso(),
+    createdAt: nowIso(),
+    updatedAt: nowIso()
   };
 }
 

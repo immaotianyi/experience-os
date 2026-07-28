@@ -90,6 +90,9 @@ Use \`mcp.json\` as the server definition in an MCP-compatible client. The relay
 - \`eos_project_readiness\` — see what blocks promotion
 - \`eos_verified_experience\` — retrieve approved experience assets
 - \`eos_project_timeline\` — read the evidence-first timeline
+- \`eos_ingest_code_graph\` — ingest code structure graph and extract patterns
+- \`eos_query_code_patterns\` — query stored code graph patterns
+- \`eos_blast_radius\` — compute change impact (blast radius) for a code node
 
 The workspace's business files are untouched. You may delete \`.eos/\` to remove this local EOS installation.
 

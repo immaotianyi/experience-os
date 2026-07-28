@@ -8,6 +8,7 @@ function stableKey(record) {
   if (record.kind === "WorkflowPattern") return `${record.kind}:${record.name}:${record.pattern}`;
   if (record.kind === "PreferenceHypothesis") return `${record.kind}:${record.statement}`;
   if (record.kind === "ThoughtFragment") return `${record.kind}:${record.summary}`;
+  if (record.kind === "CodeGraphPattern") return `${record.kind}:${record.patternType}:${record.nodeId || record.nodeIds?.join(",")}`;
   return `${record.kind}:${record.id}`;
 }
 
@@ -50,6 +51,7 @@ function contributionForRecord(record) {
   if (record.kind === "WorkflowPattern") return `可复用工作流形态：${record.name}`;
   if (record.kind === "PreferenceHypothesis") return `可作为待验证的人类偏好：${record.statement}`;
   if (record.kind === "ThoughtFragment") return `可作为思想源证据：${record.summary}`;
+  if (record.kind === "CodeGraphPattern") return `代码结构模式（${record.patternType}）：${record.description}`;
   return "可作为下一轮上下文候选资产";
 }
 
@@ -60,14 +62,16 @@ export async function buildReuseContext({ vault, projectId, query }) {
     reflectionMatches,
     workflowMatches,
     preferenceMatches,
-    thoughtMatches
+    thoughtMatches,
+    codeGraphMatches
   ] = await Promise.all([
     searchKind(vault, query, "Rule", 3),
     searchKind(vault, query, "Skill", 3),
     searchKind(vault, query, "ReflectionMemory", 3),
     searchKind(vault, query, "WorkflowPattern", 3),
     searchKind(vault, query, "PreferenceHypothesis", 2),
-    searchKind(vault, query, "ThoughtFragment", 2)
+    searchKind(vault, query, "ThoughtFragment", 2),
+    searchKind(vault, query, "CodeGraphPattern", 3)
   ]);
 
   const matches = [
@@ -76,7 +80,8 @@ export async function buildReuseContext({ vault, projectId, query }) {
     ...reflectionMatches,
     ...workflowMatches,
     ...preferenceMatches,
-    ...thoughtMatches
+    ...thoughtMatches,
+    ...codeGraphMatches
   ];
 
   const matchedRecordIds = matches.map(({ record, score }) => ({
@@ -91,6 +96,7 @@ export async function buildReuseContext({ vault, projectId, query }) {
   const recommendedWorkflowIds = ids(workflowMatches);
   const preferenceIds = ids(preferenceMatches);
   const thoughtIds = ids(thoughtMatches);
+  const codeGraphIds = ids(codeGraphMatches);
 
   return createReuseContext({
     id: `reuse.${slug(projectId)}.${Date.now()}`,
@@ -110,7 +116,8 @@ export async function buildReuseContext({ vault, projectId, query }) {
       `推荐反思: ${unique(recommendedReflectionIds).length}`,
       `推荐工作流: ${unique(recommendedWorkflowIds).length}`,
       `相关偏好假设: ${preferenceIds.length}`,
-      `相关思想片段: ${thoughtIds.length}`
+      `相关思想片段: ${thoughtIds.length}`,
+      `代码结构模式: ${codeGraphIds.length}`
     ].join("\n")
   });
 }

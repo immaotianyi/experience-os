@@ -41,10 +41,11 @@ describe("3.0 domain constants", () => {
     assert.deepEqual([...PROJECT_STATUSES], ["planning", "active", "paused", "completed", "archived"]);
   });
 
-  it("EVIDENCE_TYPES has 7 types", () => {
-    assert.equal(EVIDENCE_TYPES.length, 7);
+  it("EVIDENCE_TYPES has 8 types", () => {
+    assert.equal(EVIDENCE_TYPES.length, 8);
     assert.ok(EVIDENCE_TYPES.includes("code"));
     assert.ok(EVIDENCE_TYPES.includes("feedback"));
+    assert.ok(EVIDENCE_TYPES.includes("code-graph"));
   });
 
   it("OUTCOME_STATES has 4 states", () => {

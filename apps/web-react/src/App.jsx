@@ -4,7 +4,8 @@ import { useTheme } from "./hooks/useTheme.js";
 import {
   IconOverview, IconReview, IconWall, IconSkills, IconAudit,
   IconVault, IconMarket, IconQuality, IconRevenue, IconProject,
-  IconRefresh, IconClose, IconSun, IconMoon, IconFeedback, IconPlatform
+  IconRefresh, IconClose, IconSun, IconMoon, IconFeedback, IconPlatform,
+  IconCodeGraph
 } from "./components/icons.jsx";
 import AttentionBeacon from "./components/AttentionBeacon.jsx";
 import ProjectView from "./views/ProjectView.jsx";
@@ -21,6 +22,7 @@ import QualityView from "./views/QualityView.jsx";
 import SellerRevenueView from "./views/SellerRevenueView.jsx";
 import BetaFeedbackView from "./views/BetaFeedbackView.jsx";
 import PlatformView from "./views/PlatformView.jsx";
+import CodeGraphView from "./views/CodeGraphView.jsx";
 
 const RAIL_GROUPS = [
   { label: "主线", items: [
@@ -31,6 +33,7 @@ const RAIL_GROUPS = [
     { id: "review", label: "审查包", icon: IconReview, key: "6" },
     { id: "wallhits", label: "撞墙", icon: IconWall, key: "7" },
     { id: "skills", label: "Skill 库", icon: IconSkills, key: "8" },
+    { id: "codegraph", label: "代码图", icon: IconCodeGraph, key: "g" },
   ]},
   { label: "交易", items: [
     { id: "marketplace", label: "市场", icon: IconMarket, key: "3" },
@@ -61,6 +64,7 @@ const VIEW_TITLES = {
   review: { eyebrow: "生产管道", title: "审查包" },
   wallhits: { eyebrow: "生产管道", title: "撞墙记录" },
   skills: { eyebrow: "生产管道", title: "Skill 库" },
+  codegraph: { eyebrow: "生产管道", title: "代码图" },
   audit: { eyebrow: "治理", title: "决策审计" },
   vault: { eyebrow: "治理", title: "Vault 维护" },
   feedback: { eyebrow: "Beta", title: "Beta 反馈" },
@@ -131,6 +135,7 @@ function Workbench() {
       case "review": return <ReviewView {...props} />;
       case "wallhits": return <WallHitsView {...props} />;
       case "skills": return <SkillsView {...props} />;
+      case "codegraph": return <CodeGraphView {...props} />;
       case "audit": return <AuditView {...props} />;
       case "vault": return <VaultView {...props} />;
       case "feedback": return <BetaFeedbackView {...props} />;

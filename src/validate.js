@@ -1,4 +1,4 @@
-import { SKILL_STATUSES, PREFERENCE_STATUSES, REVIEW_PACKET_STATUSES, PRICING_MODELS, LICENSE_TYPES, LISTING_STATUSES, TRANSACTION_TYPES, TRANSACTION_STATUSES, AUTONOMY_MODES, PROJECT_STATUSES, EVIDENCE_TYPES, OUTCOME_STATES, EXPERIENCE_ASSET_STATUSES, EXPERIENCE_RECEIPT_DRAFT_STATUSES } from "./domain.js";
+import { SKILL_STATUSES, PREFERENCE_STATUSES, REVIEW_PACKET_STATUSES, PRICING_MODELS, LICENSE_TYPES, LISTING_STATUSES, TRANSACTION_TYPES, TRANSACTION_STATUSES, AUTONOMY_MODES, PROJECT_STATUSES, EVIDENCE_TYPES, OUTCOME_STATES, EXPERIENCE_ASSET_STATUSES, EXPERIENCE_RECEIPT_DRAFT_STATUSES, CODE_GRAPH_PATTERN_TYPES } from "./domain.js";
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -570,6 +570,25 @@ export function validateOutcomeRecord(record) {
   return issues;
 }
 
+export function validateCodeGraphPattern(record) {
+  const issues = [];
+  if (!hasString(record?.id)) issues.push("codeGraphPattern.id is required");
+  if (!hasString(record?.projectId)) issues.push("codeGraphPattern.projectId is required");
+  if (!hasString(record?.sourceSnapshotId)) issues.push("codeGraphPattern.sourceSnapshotId is required");
+  if (!isOneOf(record?.patternType, CODE_GRAPH_PATTERN_TYPES)) {
+    issues.push(`codeGraphPattern.patternType must be one of: ${CODE_GRAPH_PATTERN_TYPES.join(", ")}`);
+  }
+  if (!hasString(record?.label)) issues.push("codeGraphPattern.label is required");
+  if (!hasString(record?.description)) issues.push("codeGraphPattern.description is required");
+  if (!isObject(record?.metrics)) issues.push("codeGraphPattern.metrics must be an object");
+  if (!Array.isArray(record?.applicabilityBounds)) issues.push("codeGraphPattern.applicabilityBounds must be an array");
+  if (record?.nodeId !== null && record?.nodeId !== undefined && !hasString(record.nodeId)) {
+    issues.push("codeGraphPattern.nodeId must be a non-empty string when present");
+  }
+  if (!Array.isArray(record?.nodeIds)) issues.push("codeGraphPattern.nodeIds must be an array");
+  return issues;
+}
+
 export function validateRecord(record) {
   if (!isObject(record)) return ["record must be an object"];
   if (!hasString(record.kind)) return ["record.kind is required"];
@@ -602,7 +621,8 @@ export function validateRecord(record) {
     ExperienceAsset: validateExperienceAsset,
     ExperienceReuseTrial: validateExperienceReuseTrial,
     BetaFeedback: validateBetaFeedback,
-    WorkCheckpoint: validateWorkCheckpoint
+    WorkCheckpoint: validateWorkCheckpoint,
+    CodeGraphPattern: validateCodeGraphPattern
   };
   const validator = validators[record.kind];
   return validator ? validator(record) : [`unknown record kind: ${record.kind}`];
@@ -638,7 +658,8 @@ export async function validateVault(vault) {
     "ExperienceAsset",
     "ExperienceReuseTrial",
     "BetaFeedback",
-    "WorkCheckpoint"
+    "WorkCheckpoint",
+    "CodeGraphPattern"
   ];
   const supportedKindSet = new Set(supportedKinds);
 

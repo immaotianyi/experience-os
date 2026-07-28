@@ -30,7 +30,9 @@ const COLLECTION_DIR = Object.freeze({
   ExperienceAsset: "experience-assets",
   ExperienceReuseTrial: "experience-reuse-trials",
   BetaFeedback: "beta-feedback",
-  WorkCheckpoint: "work-checkpoints"
+  WorkCheckpoint: "work-checkpoints",
+  CodeGraphPattern: "code-graph-patterns",
+  CodeGraphSnapshot: "code-graph-snapshots"
 });
 
 const KIND_BY_COLLECTION = Object.fromEntries(

@@ -54,6 +54,12 @@ import {
   approveCapturePermitRequest,
   rejectCapturePermitRequest
 } from "./capturePermitStore.js";
+import {
+  ingestCodeGraphSnapshot,
+  queryCodeGraphPatterns,
+  computeBlastRadius,
+  normalizeGraphSnapshot
+} from "./eosCodeGraphAdapter.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = projectRoot;
@@ -1332,6 +1338,64 @@ async function handleApi(request, url, response) {
       safeTx.licenseKey = maskKey(safeTx.licenseKey);
     }
     sendJson(response, safeTx);
+    return;
+  }
+
+  // ========================================================================
+  // 方案C: Code Graph endpoints
+  // ========================================================================
+
+  if (url.pathname === "/api/code-graph/ingest" && request.method === "POST") {
+    try {
+      const body = await readJsonBody(request);
+      if (!body.projectId || !body.snapshot) {
+        sendJson(response, { error: "projectId and snapshot are required" }, 400);
+        return;
+      }
+      const result = await ingestCodeGraphSnapshot(vault, {
+        projectId: body.projectId,
+        snapshot: body.snapshot,
+        sourceTool: body.sourceTool || "external",
+        sourceRef: body.sourceRef || null
+      });
+      sendJson(response, {
+        ok: true,
+        snapshotId: result.snapshotId,
+        summary: result.summary,
+        patternCount: result.records.length,
+        patterns: result.records
+      });
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/code-graph/patterns" && request.method === "GET") {
+    const projectId = url.searchParams.get("projectId");
+    if (!projectId) {
+      sendJson(response, { error: "projectId is required" }, 400);
+      return;
+    }
+    const patternType = url.searchParams.get("patternType") || null;
+    const limit = clampLimit(url.searchParams.get("limit"), 50);
+    const patterns = await queryCodeGraphPatterns(vault, { projectId, patternType, limit });
+    sendJson(response, { count: patterns.length, patterns });
+    return;
+  }
+
+  if (url.pathname === "/api/code-graph/blast-radius" && request.method === "POST") {
+    try {
+      const body = await readJsonBody(request);
+      if (!body.projectId || !body.targetId || !body.snapshot) {
+        sendJson(response, { error: "projectId, targetId, and snapshot are required" }, 400);
+        return;
+      }
+      const result = computeBlastRadius(normalizeGraphSnapshot(body.snapshot), body.targetId);
+      sendJson(response, result);
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
     return;
   }
 

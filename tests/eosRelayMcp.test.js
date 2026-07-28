@@ -67,10 +67,13 @@ describe("EOS Capture Relay MCP", () => {
     assert.equal(initialized.result.serverInfo.name, "experience-os-capture-relay");
 
     const listed = await relay.request({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-    assert.equal(listed.result.tools.length, 7);
+    assert.equal(listed.result.tools.length, 10);
     assert.ok(listed.result.tools.some((tool) => tool.name === "eos_capture_collaboration"));
     assert.ok(listed.result.tools.some((tool) => tool.name === "eos_prepare_capture_permit"));
     assert.ok(listed.result.tools.some((tool) => tool.name === "eos_submit_receipt_draft"));
+    assert.ok(listed.result.tools.some((tool) => tool.name === "eos_ingest_code_graph"));
+    assert.ok(listed.result.tools.some((tool) => tool.name === "eos_query_code_patterns"));
+    assert.ok(listed.result.tools.some((tool) => tool.name === "eos_blast_radius"));
 
     const rejected = await relay.request({
       jsonrpc: "2.0", id: 3, method: "tools/call",

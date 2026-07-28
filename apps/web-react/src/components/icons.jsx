@@ -229,3 +229,16 @@ export function IconPlatform(props) {
     </svg>
   );
 }
+
+export function IconCodeGraph(props) {
+  return (
+    <svg {...base} {...props}>
+      <circle cx="6" cy="6" r="2.5" />
+      <circle cx="18" cy="6" r="2.5" />
+      <circle cx="12" cy="18" r="2.5" />
+      <line x1="8" y1="7" x2="16" y2="7" />
+      <line x1="7" y1="8" x2="11" y2="16" />
+      <line x1="17" y1="8" x2="13" y2="16" />
+    </svg>
+  );
+}

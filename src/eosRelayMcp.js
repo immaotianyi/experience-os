@@ -23,6 +23,13 @@ import {
   getProjectReadiness,
   submitAgentExperienceReceiptDraft
 } from "./projectEngine.js";
+import {
+  ingestCodeGraphSnapshot,
+  queryCodeGraphPatterns,
+  getBlastRadius,
+  computeBlastRadius,
+  normalizeGraphSnapshot
+} from "./eosCodeGraphAdapter.js";
 
 // GitVault may announce initialization. MCP stdout must contain JSON-RPC only.
 console.log = (...args) => stderr.write(`[EOS Relay] ${args.join(" ")}\n`);
@@ -129,6 +136,64 @@ const TOOLS = [
       properties: { projectId: { type: "string" } }
     },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  {
+    name: "eos_ingest_code_graph",
+    description: "Ingest a code structure graph snapshot (nodes + edges) into EOS. Extracts structural patterns (hubs, hotspots, cycles, leaves, bridges) and stores them as CodeGraphPattern records for self-iteration.",
+    inputSchema: {
+      type: "object",
+      required: ["projectId", "snapshot"],
+      properties: {
+        projectId: { type: "string" },
+        snapshot: {
+          type: "object",
+          description: "Code graph snapshot with nodes (id, type, label, filePath, loc, complexity) and edges (source, target, kind, weight).",
+          properties: {
+            nodes: { type: "array", items: { type: "object" } },
+            edges: { type: "array", items: { type: "object" } },
+            metadata: { type: "object" }
+          }
+        },
+        sourceTool: { type: "string", description: "The tool that produced this graph (e.g. tree-sitter, babel-parser, ripgrep)." },
+        sourceRef: { type: "string", description: "Optional reference (commit hash, branch, file path)." }
+      }
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
+  },
+  {
+    name: "eos_query_code_patterns",
+    description: "Query code graph patterns stored in the EOS Vault. Filter by patternType (hub|hotspot|cycle|leaf|bridge) or projectId.",
+    inputSchema: {
+      type: "object",
+      required: ["projectId"],
+      properties: {
+        projectId: { type: "string" },
+        patternType: { type: "string", description: "Optional filter: hub, hotspot, cycle, leaf, or bridge." },
+        limit: { type: "number", minimum: 1, maximum: 100 }
+      }
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  {
+    name: "eos_blast_radius",
+    description: "Compute the blast radius of changing a specific code node. Returns direct dependents, transitive dependents, affected files, and a risk level (low|medium|high|critical).",
+    inputSchema: {
+      type: "object",
+      required: ["projectId", "targetId", "snapshot"],
+      properties: {
+        projectId: { type: "string" },
+        targetId: { type: "string", description: "The node id whose change impact you want to assess." },
+        snapshot: {
+          type: "object",
+          description: "The code graph snapshot to analyze.",
+          properties: {
+            nodes: { type: "array", items: { type: "object" } },
+            edges: { type: "array", items: { type: "object" } }
+          }
+        }
+      }
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }
 ];
 
@@ -206,6 +271,28 @@ async function callTool(name, args = {}) {
   }
   if (name === "eos_project_timeline") {
     return textResult(await buildProjectTimeline(vault, args.projectId));
+  }
+  if (name === "eos_ingest_code_graph") {
+    const result = await ingestCodeGraphSnapshot(vault, {
+      projectId: args.projectId,
+      snapshot: args.snapshot,
+      sourceTool: args.sourceTool || "external",
+      sourceRef: args.sourceRef || null
+    });
+    return textResult({ ok: true, snapshotId: result.snapshotId, summary: result.summary, patternCount: result.records.length, message: `Ingested ${result.records.length} code graph patterns from ${result.summary.nodeCount} nodes and ${result.summary.edgeCount} edges.` });
+  }
+  if (name === "eos_query_code_patterns") {
+    const limit = Math.min(Math.max(Number(args.limit) || 50, 1), 100);
+    const patterns = await queryCodeGraphPatterns(vault, {
+      projectId: args.projectId,
+      patternType: args.patternType || null,
+      limit
+    });
+    return textResult({ projectId: args.projectId, count: patterns.length, patterns });
+  }
+  if (name === "eos_blast_radius") {
+    const result = computeBlastRadius(normalizeGraphSnapshot(args.snapshot), args.targetId);
+    return textResult(result);
   }
   throw new Error(`Unknown tool: ${name}`);
 }
