@@ -72,13 +72,17 @@ export function validateLicenseType(license) {
  */
 export function calculateCommission(amount) {
   const safeAmount = Math.max(0, Number(amount) || 0);
-  const commission = Math.round(safeAmount * COMMISSION_RATE * 100) / 100;
-  const netToSeller = Math.round((safeAmount - commission) * 100) / 100;
+  // Use integer cents to avoid floating-point precision errors:
+  // 9.9 * 0.15 = 1.484999... in IEEE 754, which rounds to 1.48 instead of 1.49.
+  // Converting to cents first ensures exact arithmetic.
+  const cents = Math.round(safeAmount * 100);
+  const commissionCents = Math.round(cents * COMMISSION_RATE);
+  const netCents = cents - commissionCents;
   return {
     amount: safeAmount,
-    commission,
-    netToSeller,
-    platformShare: commission
+    commission: commissionCents / 100,
+    netToSeller: netCents / 100,
+    platformShare: commissionCents / 100
   };
 }
 

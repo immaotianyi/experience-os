@@ -71,7 +71,7 @@ export async function processPurchase(vault, { listingId, buyerId, purchaseType 
       // download counts for free listings.
       const existingLicense = await verifyBuyerLicense(vault, listingId, buyerId);
       if (existingLicense.hasLicense) {
-        throw new Error(`Buyer ${buyerId} already holds a license for this listing. Use the existing license key: ${existingLicense.licenseKey}`);
+        throw new Error(`Buyer ${buyerId} already holds a license for this listing. Please check your order history for the license key.`);
       }
     }
 
@@ -243,9 +243,13 @@ export async function getRevenueSummary(vault, sellerId) {
     (t) => t.sellerId === sellerId && t.status === "completed" && t.type !== "trial"
   );
 
-  const totalRevenue = sellerTx.reduce((acc, t) => acc + (t.amount || 0), 0);
-  const totalCommission = sellerTx.reduce((acc, t) => acc + (t.commission || 0), 0);
-  const netRevenue = totalRevenue - totalCommission;
+  // Use integer cents accumulation to avoid floating-point drift across
+  // many transactions. Each amount is rounded to cents before summing.
+  const totalRevenueCents = sellerTx.reduce((acc, t) => acc + Math.round((t.amount || 0) * 100), 0);
+  const totalCommissionCents = sellerTx.reduce((acc, t) => acc + Math.round((t.commission || 0) * 100), 0);
+  const totalRevenue = totalRevenueCents / 100;
+  const totalCommission = totalCommissionCents / 100;
+  const netRevenue = (totalRevenueCents - totalCommissionCents) / 100;
 
   const byType = {
     purchase: sellerTx.filter((t) => t.type === "purchase").length,

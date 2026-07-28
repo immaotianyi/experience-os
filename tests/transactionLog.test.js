@@ -101,9 +101,9 @@ describe("processPurchase", () => {
   it("processes a paid purchase with commission split", async () => {
     const result = await processPurchase(vault, { listingId: paidListingId, buyerId: "buyer.paid1" });
     assert.equal(result.transaction.amount, 29.9);
-    // 29.9 * 0.15 = 4.485 → floats to 4.484999... → rounds to 4.48
-    assert.equal(result.transaction.commission, 4.48);
-    assert.equal(result.transaction.netToSeller, 25.42);
+    // 29.9 * 0.15 = 4.485 → with integer-cents arithmetic, correctly rounds to 4.49
+    assert.equal(result.transaction.commission, 4.49);
+    assert.equal(result.transaction.netToSeller, 25.41);
     assert.equal(result.transaction.licenseType, "Commercial");
     assert.ok(result.licenseKey.startsWith("EOS-COMMERCIAL-"));
   });

@@ -1231,7 +1231,10 @@ async function handleApi(request, url, response) {
       const tx = await getTransaction(vault, body.transactionId);
       if (!tx) throw new Error("Transaction not found");
       const userContext = contextFromRequest(request);
-      if (userContext && userContext.role !== "admin" && tx.buyerId !== userContext.userId && tx.sellerId !== userContext.userId) {
+      // Default-deny: when no user context (unauthenticated), reject the
+      // refund. Previously the `userContext &&` guard short-circuited to
+      // false, allowing unauthenticated refunds.
+      if (!userContext || (userContext.role !== "admin" && tx.buyerId !== userContext.userId && tx.sellerId !== userContext.userId)) {
         sendJson(response, { error: "Permission denied: only the buyer, seller, or admin can refund" }, 403);
         return;
       }
@@ -1276,7 +1279,12 @@ async function handleApi(request, url, response) {
       return;
     }
     const result = await verifyBuyerLicense(vault, listingId, buyerId);
-    sendJson(response, result);
+    // Mask the license key — only reveal whether a license exists, not the
+    // full key, to prevent PII leakage via unauthenticated GET.
+    const masked = result.hasLicense
+      ? { hasLicense: true, licenseType: result.licenseType, licenseKey: maskKey(result.licenseKey) }
+      : { hasLicense: false };
+    sendJson(response, masked);
     return;
   }
 
@@ -1510,7 +1518,7 @@ async function buildSummary() {
   const marketplaceStats = {
     activeListings: activeListings.length,
     totalTransactions: completedTransactions.length,
-    totalRevenue: Math.round(completedTransactions.reduce((acc, t) => acc + (t.amount || 0), 0) * 100) / 100
+    totalRevenue: completedTransactions.reduce((acc, t) => acc + Math.round((t.amount || 0) * 100), 0) / 100
   };
 
   return {
@@ -1627,6 +1635,15 @@ async function buildWallHitAudit(limit) {
 
 function sendJson(response, value, status = 200) {
   send(response, status, `${JSON.stringify(value, null, 2)}\n`, "application/json; charset=utf-8");
+}
+
+/**
+ * Mask a license key for display in unauthenticated contexts.
+ * Shows only the first 4 and last 4 characters; the rest is replaced with *.
+ */
+function maskKey(key) {
+  if (typeof key !== "string" || key.length <= 8) return "****";
+  return `${key.slice(0, 4)}${"*".repeat(Math.max(4, key.length - 8))}${key.slice(-4)}`;
 }
 
 function send(response, status, body, contentType) {

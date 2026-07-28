@@ -356,17 +356,17 @@ export async function getMarketplaceStats(vault) {
   const completed = transactions.filter((t) => t.status === "completed");
 
   const totalDownloads = active.reduce((acc, l) => acc + (l.downloads || 0), 0);
-  const totalRevenue = completed.reduce((acc, t) => acc + (t.amount || 0), 0);
-  const totalCommission = completed.reduce((acc, t) => acc + (t.commission || 0), 0);
+  const totalRevenueCents = completed.reduce((acc, t) => acc + Math.round((t.amount || 0) * 100), 0);
+  const totalCommissionCents = completed.reduce((acc, t) => acc + Math.round((t.commission || 0) * 100), 0);
 
   return {
     totalListings: listings.length,
     activeListings: active.length,
     totalDownloads,
     totalTransactions: completed.length,
-    totalRevenue: Math.round(totalRevenue * 100) / 100,
-    totalCommission: Math.round(totalCommission * 100) / 100,
-    sellerPayouts: Math.round((totalRevenue - totalCommission) * 100) / 100,
+    totalRevenue: totalRevenueCents / 100,
+    totalCommission: totalCommissionCents / 100,
+    sellerPayouts: (totalRevenueCents - totalCommissionCents) / 100,
     pricingModels: {
       free: active.filter((l) => l.pricing?.model === "free").length,
       one_time: active.filter((l) => l.pricing?.model === "one_time").length,
