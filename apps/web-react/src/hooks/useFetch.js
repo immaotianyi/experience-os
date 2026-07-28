@@ -34,9 +34,12 @@ export function useFetch(url, options = {}) {
   }, []);
 
   useEffect(() => {
-    // Reset data when URL changes to prevent stale data flicker
-    setData(options.initial ?? null);
+    // Keep stale data visible during refetch (stale-while-revalidate) instead
+    // of clearing to null, which caused a full skeleton-screen flash on every
+    // refresh. Only set loading=true; the old data stays on screen until the
+    // new data arrives, then swaps in seamlessly.
     urlRef.current = url;
+    setLoading(true);
     refresh();
     return () => { if (abortRef.current) abortRef.current.abort(); };
   }, [url, refresh]);

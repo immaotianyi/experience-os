@@ -438,8 +438,8 @@ export const PLATFORMS = Object.freeze(
  * @returns {Promise<{detected: boolean, status: string, details: object}>}
  */
 export async function detectPlatform(name, options = {}) {
-  const adapter = getPlatformAdapter(name);
   try {
+    const adapter = getPlatformAdapter(name);
     return await adapter.detect(options);
   } catch (error) {
     return { detected: false, status: "error", details: { error: error.message } };
@@ -493,8 +493,8 @@ export function getPlatformAdapter(name) {
  * @returns {Promise<{started: boolean, message: string, [pid]: number, [command]: string}>}
  */
 export async function tryStartPlatform(name, options = {}) {
-  const adapter = getPlatformAdapter(name);
   try {
+    const adapter = getPlatformAdapter(name);
     return await adapter.start(options);
   } catch (error) {
     return { started: false, message: error.message };
@@ -511,6 +511,112 @@ export async function tryStartPlatform(name, options = {}) {
  */
 export function getInstallInstructions(name) {
   return getPlatformAdapter(name).instructions();
+}
+
+/**
+ * Diagnose a platform: detect it, then produce actionable next-step advice
+ * based on the detection result. Never throws.
+ *
+ * The returned object always has:
+ *   - status: the detection status
+ *   - healthy: boolean (true iff status === "active")
+ *   - advice: array of short, actionable strings (empty when healthy)
+ *   - result: the raw detection envelope
+ *
+ * @param {string} name platform name
+ * @param {object} [options] passed through to detect()
+ * @returns {Promise<{status: string, healthy: boolean, advice: string[], result: object}>}
+ */
+export async function diagnosePlatform(name, options = {}) {
+  let result;
+  try {
+    result = await detectPlatform(name, options);
+  } catch (error) {
+    result = { detected: false, status: "error", details: { error: error.message } };
+  }
+
+  const healthy = result.status === "active";
+  const advice = [];
+
+  switch (name) {
+    case "tray":
+      if (result.status === "not_configured") {
+        if (result.details?.reason === "macOS only") {
+          advice.push("Tray app is macOS-only; on this platform it will remain unavailable.");
+        } else {
+          advice.push("Build the bundle: npm run macos:bundle");
+          advice.push("Open it once: open dist/EOS.app");
+        }
+      } else if (result.status === "ready") {
+        advice.push("EOS.app is built but the launchd core agent is not loaded.");
+        advice.push("Install it: npm run macos:install-core");
+        advice.push("Or just open the app: open dist/EOS.app");
+      }
+      break;
+
+    case "work":
+      if (result.status === "not_configured") {
+        advice.push("Bootstrap a workspace: npm run bootstrap -- /path/to/project \"Project Name\"");
+        advice.push("Start the workbench: npm run workbench -- /path/to/project 4180");
+        if (result.details?.searched?.length) {
+          advice.push(`Searched: ${result.details.searched.join(", ")}`);
+        }
+      }
+      break;
+
+    case "vault":
+      if (result.status === "not_configured") {
+        advice.push("The Vault is created automatically when you bootstrap or start the server.");
+        advice.push("Set EOS_VAULT_DIR to use a custom location.");
+      } else if (result.status === "ready") {
+        advice.push("Vault directory exists but is not Git-initialized.");
+        advice.push("Ensure git is installed; the server will initialize it on first write.");
+      }
+      break;
+
+    case "codex":
+      if (result.status === "not_configured") {
+        advice.push("Install the Codex CLI and ensure 'codex' is on your PATH.");
+        advice.push("Then bootstrap a workspace and run: npm run codex:preflight -- /path/to/project");
+      } else if (result.status === "ready") {
+        advice.push("Codex CLI is installed but the EOS relay is not registered for this workspace.");
+        if (result.details?.boundVaultDir) {
+          advice.push(`Relay is bound to vault: ${result.details.boundVaultDir}`);
+        }
+        advice.push("Register the relay: npm run codex:preflight -- <workspace-dir>");
+      }
+      break;
+
+    case "cloud":
+      if (result.status === "not_configured") {
+        advice.push("Dockerfile and render.yaml exist but neither Docker nor Render CLI is installed.");
+        advice.push("Install Docker or the Render CLI to deploy.");
+      } else if (result.status === "ready") {
+        if (result.details?.docker?.installed && !result.details?.docker?.daemonRunning) {
+          advice.push("Docker is installed but the daemon is not running. Start Docker Desktop.");
+        }
+        if (result.details?.render?.installed) {
+          advice.push("Render CLI is installed. Deploy with: render deploy");
+        }
+        // Fallback: ready (configs exist) but no deployment tool is installed/running
+        if (advice.length === 0) {
+          advice.push("Deployment configs exist. Install Docker or Render CLI to deploy.");
+          advice.push("Build with Docker: docker build -t experience-os . && docker run -p 8080:8080 experience-os");
+        }
+      }
+      break;
+
+    default:
+      if (result.status === "error") {
+        advice.push(result.details?.error || "Unknown platform error.");
+      }
+  }
+
+  if (healthy) {
+    advice.length = 0; // no advice needed when healthy
+  }
+
+  return { status: result.status, healthy, advice, result };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

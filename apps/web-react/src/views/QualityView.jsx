@@ -8,9 +8,23 @@ function GradeBadge({ grade }) {
   return <span className={`grade-badge grade-${grade}`}>{grade}</span>;
 }
 
-function LeaderboardRow({ entry, rank, onOpen }) {
+function LeaderboardRow({ entry, rank, onOpen, loadingSkillId }) {
+  const isLoading = loadingSkillId === entry.skillId;
   return (
-    <tr onClick={() => onOpen(entry)} style={{ cursor: "pointer" }}>
+    <tr
+      onClick={() => !isLoading && onOpen(entry)}
+      style={{ cursor: isLoading ? "wait" : "pointer" }}
+      tabIndex={0}
+      role="button"
+      aria-label={`查看 ${entry.skillName || entry.skillId} 的质量报告`}
+      onKeyDown={(e) => {
+        if (isLoading) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpen(entry);
+        }
+      }}
+    >
       <td style={{ textAlign: "center", fontWeight: 700 }}>{rank}</td>
       <td>{entry.skillName || entry.skillId}</td>
       <td style={{ textAlign: "center" }}><GradeBadge grade={entry.grade} /></td>
@@ -19,7 +33,7 @@ function LeaderboardRow({ entry, rank, onOpen }) {
       <td style={{ textAlign: "center" }}>{entry.signals?.downloadCount ?? 0}</td>
       <td style={{ textAlign: "center" }}>{entry.signals?.ratingCount ?? 0}</td>
       <td style={{ textAlign: "center" }}>
-        {entry.shouldFlag ? <span className="pill bad">需修订</span> : <span className="pill ok">正常</span>}
+        {isLoading ? <span className="pill">加载中…</span> : entry.shouldFlag ? <span className="pill bad">需修订</span> : <span className="pill ok">正常</span>}
       </td>
     </tr>
   );
@@ -72,6 +86,7 @@ function QualityReportDetail({ report, toast }) {
 export default function QualityView({ openDrawer, refreshKey, toast }) {
   const [limit, setLimit] = useState(20);
   const [autoFlagging, setAutoFlagging] = useState(false);
+  const [loadingSkillId, setLoadingSkillId] = useState(null);
 
   const url = `/api/quality/leaderboard?limit=${limit}&t=${refreshKey}`;
   const { data, loading, error, refresh } = useFetch(url);
@@ -95,6 +110,7 @@ export default function QualityView({ openDrawer, refreshKey, toast }) {
   };
 
   const openReport = async (entry) => {
+    setLoadingSkillId(entry.skillId);
     try {
       const report = await fetchQualityReport(entry.skillId);
       openDrawer({
@@ -104,6 +120,8 @@ export default function QualityView({ openDrawer, refreshKey, toast }) {
       });
     } catch (err) {
       toast(err.message, "bad", "加载报告失败");
+    } finally {
+      setLoadingSkillId(null);
     }
   };
 
@@ -175,7 +193,7 @@ export default function QualityView({ openDrawer, refreshKey, toast }) {
           </thead>
           <tbody>
             {leaderboard.map((e, i) => (
-              <LeaderboardRow key={e.skillId} entry={e} rank={i + 1} onOpen={openReport} />
+              <LeaderboardRow key={e.skillId} entry={e} rank={i + 1} onOpen={openReport} loadingSkillId={loadingSkillId} />
             ))}
           </tbody>
         </table>

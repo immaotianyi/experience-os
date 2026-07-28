@@ -14,6 +14,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile, readFile, access, rm, stat, rename } from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import { Vault } from "./vault.js";
 
@@ -22,6 +23,23 @@ const WRITE_LOCK_NAME = ".eos-write-lock";
 const LOCK_WAIT_MS = 25;
 const LOCK_TIMEOUT_MS = 15_000;
 const STALE_LOCK_MS = 120_000;
+
+/**
+ * Per-async-context state for write lock reentrancy and transaction tracking.
+ *
+ * Previously `writeLockDepth` and `transaction` were instance-level fields.
+ * When request A held the lock (depth=1) and awaited I/O, request B saw
+ * depth > 0 and skipped locking — a race that allowed concurrent writes
+ * without serialization. AsyncLocalStorage scopes the state to each
+ * independent async chain so only genuine reentrant calls (same chain)
+ * bypass the lock, while concurrent requests from different chains must
+ * wait.
+ */
+const vaultContext = new AsyncLocalStorage();
+
+function getCtx() {
+  return vaultContext.getStore() || { writeLockDepth: 0, transaction: null };
+}
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -58,8 +76,6 @@ export class GitVault {
     this.rootDir = rootDir;
     this.vault = new Vault(rootDir);
     this.gitEnabled = false;
-    this.writeLockDepth = 0;
-    this.transaction = null;
   }
 
   async init() {
@@ -115,13 +131,11 @@ export class GitVault {
 
   async withWriteLock(work, { timeoutMs = LOCK_TIMEOUT_MS } = {}) {
     if (typeof work !== "function") throw new Error("withWriteLock requires a function");
-    if (this.writeLockDepth > 0) {
-      this.writeLockDepth += 1;
-      try {
-        return await work();
-      } finally {
-        this.writeLockDepth -= 1;
-      }
+    const ctx = getCtx();
+    if (ctx.writeLockDepth > 0) {
+      // Reentrant call within the same async context — safe to bypass the
+      // cross-process mkdir lock since the outer call already holds it.
+      return vaultContext.run({ ...ctx, writeLockDepth: ctx.writeLockDepth + 1 }, work);
     }
 
     await mkdir(this.rootDir, { recursive: true });
@@ -150,13 +164,13 @@ export class GitVault {
       }
     }
 
-    this.writeLockDepth = 1;
-    try {
-      return await work();
-    } finally {
-      this.writeLockDepth = 0;
-      await rm(lockDir, { recursive: true, force: true });
-    }
+    return vaultContext.run({ writeLockDepth: 1, transaction: null }, async () => {
+      try {
+        return await work();
+      } finally {
+        await rm(lockDir, { recursive: true, force: true });
+      }
+    });
   }
 
   async save(record) {
@@ -165,10 +179,11 @@ export class GitVault {
 
   async saveUnlocked(record) {
     const filePath = this.vault.fileFor(record);
-    if (this.transaction) {
-      await this.snapshotTransactionFile(filePath);
+    const { transaction } = getCtx();
+    if (transaction) {
+      await this.snapshotTransactionFile(filePath, transaction);
       const savedPath = await this.vault.save(record);
-      this.transaction.changedPaths.add(savedPath);
+      transaction.changedPaths.add(savedPath);
       return savedPath;
     }
 
@@ -201,38 +216,42 @@ export class GitVault {
    */
   async withTransaction(work, { message = "[Vault] transaction" } = {}) {
     if (typeof work !== "function") throw new Error("withTransaction requires a function");
-    if (this.transaction) return work();
+    const ctx = getCtx();
+    if (ctx.transaction) return work();
 
     return this.withWriteLock(async () => {
-      this.transaction = { snapshots: new Map(), changedPaths: new Set() };
-      try {
-        const result = await work();
-        await this.commitTransaction(message);
-        return result;
-      } catch (error) {
-        await this.rollbackTransaction();
-        throw error;
-      } finally {
-        this.transaction = null;
-      }
+      const innerCtx = getCtx();
+      const transaction = { snapshots: new Map(), changedPaths: new Set() };
+      return vaultContext.run({ ...innerCtx, transaction }, async () => {
+        try {
+          const result = await work();
+          await this.commitTransaction(message, transaction);
+          return result;
+        } catch (error) {
+          await this.rollbackTransaction(transaction);
+          throw error;
+        }
+      });
     });
   }
 
-  async snapshotTransactionFile(filePath) {
-    if (this.transaction.snapshots.has(filePath)) return;
+  async snapshotTransactionFile(filePath, transaction = getCtx().transaction) {
+    if (!transaction) return;
+    if (transaction.snapshots.has(filePath)) return;
     try {
-      this.transaction.snapshots.set(filePath, await readFile(filePath));
+      transaction.snapshots.set(filePath, await readFile(filePath));
     } catch (error) {
       if (error.code === "ENOENT") {
-        this.transaction.snapshots.set(filePath, null);
+        transaction.snapshots.set(filePath, null);
         return;
       }
       throw error;
     }
   }
 
-  async rollbackTransaction() {
-    const snapshots = [...this.transaction.snapshots.entries()].reverse();
+  async rollbackTransaction(transaction = getCtx().transaction) {
+    if (!transaction) return;
+    const snapshots = [...transaction.snapshots.entries()].reverse();
     for (const [filePath, original] of snapshots) {
       try {
         if (original === null) {
@@ -249,9 +268,10 @@ export class GitVault {
     }
   }
 
-  async commitTransaction(message) {
-    if (!this.gitEnabled || this.transaction.changedPaths.size === 0) return;
-    const relPaths = [...this.transaction.changedPaths]
+  async commitTransaction(message, transaction = getCtx().transaction) {
+    if (!transaction) return;
+    if (!this.gitEnabled || transaction.changedPaths.size === 0) return;
+    const relPaths = [...transaction.changedPaths]
       .map((filePath) => path.relative(this.rootDir, filePath));
     try {
       git(["add", ...relPaths], this.rootDir);

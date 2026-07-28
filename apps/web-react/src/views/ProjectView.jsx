@@ -300,7 +300,11 @@ export default function ProjectView({ refreshKey, toast }) {
 
   /* ——— 主线派生状态 ——— */
   const counts = timeline?.counts || {};
-  const timelineItems = timeline?.timeline || [];
+  // Filter out items with null records — the TimelineItem component already
+  // guards against null records, but upstream code (Map construction, key
+  // generation) would crash on `item.record.id`. Filtering here is safe
+  // because counts come from the API, not from timelineItems.length.
+  const timelineItems = (timeline?.timeline || []).filter((item) => item && item.record);
   const pendingDrafts = receiptDrafts.filter((draft) => draft.status === "pending_review");
   const historyDrafts = receiptDrafts.filter((draft) => draft.status !== "pending_review");
   const canGenerateDraft = llmStatus?.isLive || llmStatus?.mockDraftsAllowed;

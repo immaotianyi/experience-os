@@ -231,6 +231,18 @@ async function handleApi(request, url, response) {
     return;
   }
 
+  if (url.pathname.startsWith("/api/platforms/") && url.pathname.endsWith("/diagnose") && request.method === "GET") {
+    const name = url.pathname.slice("/api/platforms/".length, -"/diagnose".length);
+    try {
+      const { diagnosePlatform } = await import("./eosPlatformAdapter.js");
+      const diagnosis = await diagnosePlatform(name);
+      sendJson(response, diagnosis);
+    } catch (error) {
+      sendJson(response, { status: "error", healthy: false, advice: [error.message], result: null }, 400);
+    }
+    return;
+  }
+
   if (url.pathname === "/api/beta-feedback" && request.method === "POST") {
     const address = request.socket.remoteAddress ?? "unknown";
     const now = Date.now();
@@ -240,13 +252,20 @@ async function handleApi(request, url, response) {
       sendJson(response, { error: "Too many feedback submissions. Please try again later." }, 429);
       return;
     }
+    // Reserve the slot BEFORE the async submission to close the TOCTOU gap:
+    // two concurrent requests could both pass the `>= 5` check and push,
+    // allowing 6 submissions. By pushing synchronously here, the second
+    // request sees the updated count.
+    attempts.push(now);
+    betaFeedbackAttempts.set(address, attempts);
     try {
       const feedback = await submitBetaFeedback(vault, await readJsonBody(request));
-      // Only count successful submissions toward the rate limit
-      attempts.push(now);
-      betaFeedbackAttempts.set(address, attempts);
       sendJson(response, { ok: true, id: feedback.id }, 201);
     } catch (error) {
+      // Submission failed — release the reserved slot so the user can retry
+      attempts.pop();
+      if (attempts.length === 0) betaFeedbackAttempts.delete(address);
+      else betaFeedbackAttempts.set(address, attempts);
       sendJson(response, { error: error.message }, 400);
     }
     return;

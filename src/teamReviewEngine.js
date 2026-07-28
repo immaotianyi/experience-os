@@ -198,8 +198,22 @@ export async function finalizeTeamReview({ packet, vault, finalDecisionBy }) {
   packet.decisionId = decision.id;
   packet.updatedAt = nowIso();
 
-  // Save both records atomically — if either fails, the other must not persist
+  // Save both records atomically — if either fails, the other must not persist.
+  // Reload the packet inside the lock to prevent TOCTOU: two concurrent
+  // finalize calls could both pass the "ready" check and create duplicate
+  // ReviewDecision records.
   const doSave = async () => {
+    if (typeof vault.load === "function") {
+      const freshPacket = await vault.load("ReviewPacket", packet.id).catch(() => null);
+      if (freshPacket && freshPacket.status === "decided") {
+        throw new Error(`Review packet ${packet.id} has already been finalized`);
+      }
+      // Sync any vote changes from the fresh packet back into our working copy
+      if (freshPacket) {
+        packet.votes = freshPacket.votes || packet.votes;
+        packet.assigneeIds = freshPacket.assigneeIds || packet.assigneeIds;
+      }
+    }
     await vault.save(decision);
     await vault.save(packet);
   };

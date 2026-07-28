@@ -130,8 +130,10 @@ describe("EOS platform adapter", () => {
   });
 
   describe("tryStartPlatform", () => {
-    it("throws for an unknown platform name", async () => {
-      await assert.rejects(() => tryStartPlatform("nope"), /Unknown EOS platform/);
+    it("returns a started:false envelope for an unknown platform name", async () => {
+      const result = await tryStartPlatform("nope");
+      assert.equal(result.started, false);
+      assert.ok(result.message, "should carry an error message");
     });
 
     it("returns a result object for a platform with no runnable process (vault)", async () => {
