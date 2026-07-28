@@ -214,12 +214,20 @@ async function handleApi(request, url, response) {
       }
       sendJson(response, health);
     } catch (error) {
-      sendJson(response, { error: error.message }, 500);
+      // Don't leak internal error details — log server-side, return generic message
+      console.error("[webServer] /api/platforms error:", error.message);
+      sendJson(response, { error: "Failed to check platform health" }, 500);
     }
     return;
   }
 
   if (url.pathname.startsWith("/api/platforms/") && url.pathname.endsWith("/start") && request.method === "POST") {
+    // Require authentication — starting platforms can spawn processes.
+    const userContext = contextFromRequest(request);
+    if (!userContext) {
+      sendJson(response, { started: false, message: "Authentication required to start platform components." }, 401);
+      return;
+    }
     const name = url.pathname.slice("/api/platforms/".length, -"/start".length);
     try {
       const body = await readJsonBody(request).catch(() => ({}));
@@ -274,7 +282,8 @@ async function handleApi(request, url, response) {
   if (url.pathname === "/api/beta-feedback" && request.method === "GET") {
     const records = latest(await vault.list("BetaFeedback"), 100);
     const userContext = contextFromRequest(request);
-    const isAdmin = !userContext || userContext.role === "admin";
+    // Default-deny: only authenticated admins can see contact PII.
+    const isAdmin = userContext && userContext.role === "admin";
     const safe = isAdmin ? records : records.map((r) => { const { contact, ...rest } = r; return rest; });
     sendJson(response, { kind: "BetaFeedback", records: safe });
     return;
@@ -282,7 +291,8 @@ async function handleApi(request, url, response) {
 
   if (url.pathname === "/api/beta-feedback/export" && request.method === "GET") {
     const userContext = contextFromRequest(request);
-    if (userContext && userContext.role !== "admin") {
+    // Default-deny: require authenticated admin for export (which includes PII).
+    if (!userContext || userContext.role !== "admin") {
       sendJson(response, { error: "Admin access required for export" }, 403);
       return;
     }
@@ -1265,7 +1275,13 @@ async function handleApi(request, url, response) {
     const history = await getTransactionHistory(vault, options);
     const userContext = contextFromRequest(request);
     const filtered = filterReadable(history, userContext);
-    sendJson(response, { count: filtered.length, transactions: filtered });
+    // Mask license keys for non-owners to prevent leakage.
+    const safeFiltered = filtered.map((tx) => {
+      if (!tx.licenseKey) return tx;
+      const isOwner = userContext && (tx.buyerId === userContext.userId || tx.sellerId === userContext.userId || userContext.role === "admin");
+      return isOwner ? tx : { ...tx, licenseKey: maskKey(tx.licenseKey) };
+    });
+    sendJson(response, { count: safeFiltered.length, transactions: safeFiltered });
     return;
   }
 
@@ -1308,7 +1324,14 @@ async function handleApi(request, url, response) {
       sendJson(response, { error: "Transaction not found" }, 404);
       return;
     }
-    sendJson(response, tx);
+    // Mask license key to prevent leakage via unauthenticated GET.
+    const userContext = contextFromRequest(request);
+    const isOwner = userContext && (tx.buyerId === userContext.userId || tx.sellerId === userContext.userId || userContext.role === "admin");
+    const safeTx = { ...tx };
+    if (!isOwner && safeTx.licenseKey) {
+      safeTx.licenseKey = maskKey(safeTx.licenseKey);
+    }
+    sendJson(response, safeTx);
     return;
   }
 
