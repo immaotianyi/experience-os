@@ -1,3 +1,55 @@
+/**
+ * Self-Iteration Engine — 自我迭代引擎，从历史运行轨迹中提取并生成新的 Skill 候选。
+ *
+ * 做什么：
+ *   runSelfIteration() 读取 Vault 中最近的 ReuseContext、WorkflowPattern、ReflectionMemory、
+ *   MotherSkillTrajectory 和 CodeGraphPattern，基于这些"历史经验证据"生成一批 SkillCandidate，
+ *   逐个通过 validateSkillForProduction() 生产验证：通过的 Skill 连同 Artifact 入库，
+ *   不通过的生成 WallHit。整次迭代打包为 SelfIterationRun 记录，包含候选/通过/拒绝/撞墙
+ *   的完整清单，并正确回填 ReuseContext 中实际被消费的 contributionCandidates 的使用结果。
+ *
+ * 核心抽象：
+ *   - 两类 Skill 来源：
+ *     1) 工作流内生 Skill（4 个固定模板）：reuse_context_builder、wallhit_reflection_builder、
+ *        preference_hypothesis_review_gate、auto_skill_growth_orchestrator。它们来自
+ *        2.0 管道中已验证成功/必要的操作模式，代表"系统自己学会做自己正在做的事"。
+ *     2) 代码图谱派生 Skill（generateCodeGraphSkills）：从 CodeGraphPattern 的 5 种拓扑
+ *        类型（hub/hotspot/cycle/leaf/bridge）各映射到一个专用 Skill，将架构反模式/
+ *        结构特征转化为可复用的工程守卫或重构操作。
+ *   - createValidatedSkill() 统一填充安全级别（L1）、降级路径（return_wallhit_with_repair_steps）、
+ *     人类确认要求（true）等生产通道最低门槛字段，确保自我迭代不绕过安全护栏。
+ *   - 每次迭代使用时间戳后缀构造 ID，避免覆盖之前已审查/升级的同名 Skill。
+ *
+ * 关键不变量：
+ *   1. 自我迭代生成的 Skill 必须和人工创建的 Skill 走同一个生产验证通道
+ *      （validateSkillForProduction），不允许自我生成的 Skill 绕过校验直接入库。
+ *   2. 所有生成的 Skill 都强制 safetyLevel=L1、humanConfirmationRequired=true、
+ *      fallback 非空，确保 AI 自我进化不会脱离人类监督。
+ *   3. updateReuseContextOutcomes() 只标记实际被本次 run 消费（出现在 sourceRecordIds/
+ *      candidateSkillIds/acceptedSkillIds 中）的 contributionCandidate 为 used，
+ *      不会像早期版本那样把整个 ReuseContext 的所有候选都标记为已使用——那样会污染
+ *      复用反馈信号。
+ *   4. CodeGraphPattern.list() 失败时（.catch(() => [])）静默降级为空列表，不阻塞
+ *      自我迭代主流程，因为代码图谱是 3.0 增量能力。
+ *
+ * 设计取舍：
+ *   - 工作流内生 Skill 采用硬编码模板而非从轨迹自动归纳，因为 2.0/3.0 阶段训练数据
+ *     （SelfIterationRun 数量）极少，自动归纳容易产生幻觉 Skill；固定模板保证质量，
+ *     数据充足后再切换到归纳模式。
+ *   - 从每类历史记录中只取 latest 2 条（CodeGraphPattern 取 5 条）作为证据来源，
+ *     避免单次迭代吸入过多上下文导致 Skill 候选发散；迭代是持续的，不需要一次吃成胖子。
+ *   - code graph 模式按 patternType 分组聚合（grouped Map），同类型多个 pattern 合并
+ *     指标（取 max fanIn/fanOut/complexity 等）生成一个 Skill 而非多个重复 Skill。
+ *   - 自我迭代不自动提升 Skill 状态（不设 status=promoted），生成的 Skill 仍需经
+ *     HUMAN_REVIEW 阶段确认后才能成为稳定工具。
+ *
+ * 不做什么：
+ *   - 不自动执行生成的 Skill（只生成规格，不触发副作用）。
+ *   - 不做 Skill 版本管理/差异对比（新旧同名 Skill 通过时间戳后缀共存，由人工审查淘汰）。
+ *   - 不跨项目迁移 Skill（所有生成的 Skill 绑定 projectId，跨项目复用由 ReuseContext 机制
+ *     在未来版本支持）。
+ *   - 不删除或归档旧的 Skill 候选（淘汰由 vaultMaintenance 处理）。
+ */
 import {
   STATES,
   createArtifact,

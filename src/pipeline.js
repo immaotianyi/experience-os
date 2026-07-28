@@ -1,3 +1,49 @@
+/**
+ * Pipeline — EOS 2.0 核心协作管道原型，串联状态机与各领域对象的端到端执行流。
+ *
+ * 做什么：
+ *   实现"非线性思想 → 工程对象 → 生产验证 → 入库/撞墙"的完整原型管道。runPrototype()
+ *   接收一段 rawThought（用户的非线性思想文本），按 stateMachine 定义的阶段顺序推进
+ *   Project 状态，依次产出 ConversationEvent、ThoughtFragment、HumanEditLog、
+ *   SubgoalSegment、Rule、SkillCandidate、WorkflowPattern、PreferenceHypothesis，
+ *   然后进入 PRODUCTION_VALIDATING：通过则产出 Artifact，不通过则产出 WallHit 和
+ *   ReflectionMemory。每个中间产物都经过 validate.js 的校验层，最终写入 Vault。
+ *   同时记录 MotherSkillTrajectory 作为母 Skill 的执行轨迹，供自我迭代回溯。
+ *
+ * 核心抽象：
+ *   - 管道是"状态推进 + 对象派生 + 即时校验 + 持久化"的四步循环。每次状态转换都由
+ *     transition() 触发，紧接着派生下一阶段的领域对象，校验通过后 vault.save()。
+ *   - 每个 derive* 函数是一个纯工厂：输入 project 和上游对象，输出一个符合 domain.js
+ *     Schema 的新对象，不做 IO、不修改入参。
+ *   - 生产验证是管道的分水岭：validateCandidateIntoArtifact() 返回 {ok, artifact} 或
+ *     {ok: false, wallHit}，决定管道走向 ARTIFACT_CREATED 还是 WALL_HIT。
+ *   - MotherSkillTrajectory 记录整条路径的输入/输出 ID 链，使经验资产可溯源到
+ *     原始 ConversationEvent。
+ *
+ * 关键不变量：
+ *   1. 每个领域对象在 vault.save() 之前必须通过对应的 validate* 校验；校验失败直接
+ *      throw Error，不产生半成品记录。
+ *   2. 状态转换严格遵循 stateMachine.js 的 TRANSITIONS 图，不允许跳步。
+ *   3. runPrototype 是原型/演示入口，使用硬编码的 project id 和派生内容，用于验证
+ *      管道骨架可跑通；它不是生产环境的通用编排器（projectEngine 才是）。
+ *   4. WALL_HIT 路径必须同时产出 WallHit 和 ReflectionMemory，失败不静默。
+ *
+ * 设计取舍：
+ *   - 管道函数手工串联（而非事件驱动/责任链），因为 2.0 阶段优先保证可读性和可调试性，
+ *     每一步都显式 vault.save()，便于断点观察 Vault 中的对象状态。
+ *   - derive* 函数内部硬编码了"非线性思想线性化"这一特定主题的内容（signals、rule
+ *     statement 等），因为本文件同时承担管道骨架验证和母 Skill 演示双重职责；通用化
+ *     的派生逻辑留待 projectEngine 在 3.0 中实现。
+ *   - completeSkill 参数控制 SkillCandidate 是否带完整 inputSchema/outputSchema：
+ *     false 时故意缺失以触发 WALL_HIT 路径演示撞墙反馈，true 时走通到 Artifact。
+ *
+ * 不做什么：
+ *   - 不实现通用的项目编排引擎（不解析任意用户意图来动态决定派生什么对象）。
+ *   - 不做并发/异步调度（所有步骤串行 await）。
+ *   - 不处理 HUMAN_REVIEW、EXPERIENCE_EXTRACTING、ASSET_STORED、REUSE_READY 等
+ *     2.0 后半段状态，原型仅覆盖到 ARTIFACT_CREATED/WALL_HIT。
+ *   - 不实现重试/回滚；撞墙后只记录 ReflectionMemory，不自动回到 COLLABORATING 重试。
+ */
 import {
   STATES,
   createArtifact,

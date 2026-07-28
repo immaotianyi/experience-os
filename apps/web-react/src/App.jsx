@@ -1,3 +1,11 @@
+/**
+ * App — React 应用根组件。
+ *
+ * 核心职责：
+ *   - 配置左侧导航栏（RAIL_GROUPS）与视图路由
+ *   - 管理全局视图切换、抽屉、键盘快捷键
+ *   - 包裹 ToastProvider 和 ErrorBoundary
+ */
 import { useState, useCallback, useEffect } from "react";
 import { ToastProvider, useToast } from "./hooks/useToast.jsx";
 import { useTheme } from "./hooks/useTheme.js";

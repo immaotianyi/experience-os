@@ -1,3 +1,72 @@
+/**
+ * Web Server — Experience OS 的本地 HTTP 入口。
+ *
+ * 做什么：
+ *   启动一个绑定到 127.0.0.1 的 Node 原生 HTTP 服务器（零 Web 框架依赖），同时承载：
+ *     1. React 前端静态资源（apps/web 或 apps/web-react 的构建产物）
+ *     2. 70+ 个 REST API 端点，是前端/MCP/tray/codex relay 访问 Vault 和各引擎的唯一网络入口
+ *   所有 API 端点都直接编排底层引擎（projectEngine / reviewEngine / marketplace 等），
+ *   不引入额外的服务层——本文件就是控制器层。
+ *
+ * 架构：
+ *   - 单进程、单实例：启动时创建一个 GitVault 实例和一个 LLM Adapter 实例，所有请求共享。
+ *   - 无框架路由：通过 url.pathname 字符串匹配分发（见 handleApi 内的 if-else 链）。
+ *     之所以不用 Express/Koa，是为了零依赖 + 冷启动快 + 攻击面小。
+ *   - 中间件层：createServer 回调在进入 handleApi 之前依次执行：
+ *       a. CORS 头（Access-Control-Allow-Origin: *，因绑定 127.0.0.1 仅限本机）
+ *       b. JSON body 解析（readJsonBody）
+ *       c. 鉴权上下文（contextFromRequest 从 x-eos-identity 头解析身份和角色）
+ *       d. 全局异常兜底（safeErrorMessage 过滤敏感信息后返回 400/500）
+ *
+ * API 端点分组（按业务域）：
+ *   健康/平台：/api/health, /api/platforms, /api/platforms/:name/start, /api/platforms/:name/diagnose
+ *   Beta反馈： /api/beta-feedback (GET/POST), /api/beta-feedback/export
+ *   审查：    /api/review-decisions, /api/review-audit, /api/skill-review-history
+ *   Vault：   /api/vault-archive, /api/vault-maintenance, /api/validation, /api/summary,
+ *             /api/git/history, /api/git/stats
+ *   LLM：     /api/llm/status
+ *   注意力：  /api/attention
+ *   项目：    /api/projects (GET/POST), /api/project (GET/POST), /api/project/timeline,
+ *             /api/project/readiness, /api/project/trial-evidence
+ *   捕获许可：/api/capture-permits, /api/capture-permits/approve, /api/capture-permits/reject
+ *   复用：    /api/reuse-suggestions, /api/reuse-feedback, /api/experience-reuse-trials,
+ *             /api/experience-reuse-trials/complete
+ *   证据/收据：/api/evidence, /api/experience-receipt-drafts, /api/experience-receipt-drafts/accept|reject|defer|resume,
+ *             /api/experience-receipts, /api/decisions, /api/outcomes
+ *   Relay：   /api/relay/events (POST/GET) — Codex MCP relay 的事件上报端点
+ *   检查点：  /api/work-checkpoints (GET/POST)
+ *   资产：    /api/experience-assets (GET/POST)
+ *   技能市场：/api/marketplace/* (search/publish/unpublish/suspend/listing/versions/download/stats)
+ *   质量：    /api/quality/* (rate/ratings/report/flag/leaderboard)
+ *   交易：    /api/transactions/*, /api/revenue/*, /api/pricing/*
+ *   团队审查：/api/team-review/* (assign/vote/discuss/summary/finalize)
+ *   技能注册：/api/skill-registry, /api/skill-registry/import, /api/skills/metadata
+ *   MCP导出： /api/mcp/export, /api/mcp/export-all, /api/mcp/list
+ *   代码图谱：/api/code-graph/* (ingest/patterns/blast-radius)
+ *   撞墙解决：/api/wallhit-resolutions, /api/wallhit-audit
+ *
+ * 关键不变量：
+ *   1. 仅监听 127.0.0.1（EOS_HOST），不对外暴露；公网访问需通过 Docker/Render 部署模式。
+ *   2. 所有写操作必须携带身份头（x-eos-identity），且经 accessControl 校验权限；
+ *      读操作按角色过滤可见性（filterReadable）。
+ *   3. 错误响应统一走 safeErrorMessage，不把堆栈/文件路径/原始错误消息泄露给客户端。
+ *   4. 静态文件只从 apps/web 或 apps/web-react/dist 提供，禁止路径穿越（resolve 后检查前缀）。
+ *   5. Beta 反馈提交有 IP 级速率限制（betaFeedbackAttempts Map），每小时每 IP 最多 5 条。
+ *
+ * 环境变量：
+ *   PORT               监听端口，默认 4173
+ *   EOS_HOST           绑定地址，默认 127.0.0.1
+ *   EOS_VAULT_DIR      Vault 根目录，默认 work/vaults/real
+ *   EOS_ALLOW_MOCK_DRAFTS  设为 "1" 时允许 mock LLM 草稿（演示用）
+ *   EOS_DEPLOYMENT_MODE  "local"（默认）或 "cloud"（Docker/Render 部署时启用 CORS 宽松模式）
+ *
+ * 不做什么：
+ *   - 不做会话管理/JWT：身份完全由 x-eos-identity 头声明（本地可信环境；云端部署需前置反向代理鉴权）。
+ *   - 不做请求体 schema 校验（由 validate.js 在引擎层校验）。
+ *   - 不做日志框架：用 console.log/error 输出到 stdout/stderr，由 launchd/Docker 收集。
+ *   - 不做 WebSocket/SSE：当前所有端点都是 HTTP request-response；实时更新靠前端轮询。
+ */
+
 import { createServer } from "node:http";
 import { readFile, mkdir } from "node:fs/promises";
 import path from "node:path";

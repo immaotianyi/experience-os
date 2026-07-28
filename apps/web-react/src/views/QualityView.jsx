@@ -1,3 +1,12 @@
+/**
+ * QualityView — 质量看板视图。
+ *
+ * 核心职责：
+ *   - 技能质量排行榜（按综合评分排名，A/B/C/D 等级徽章）
+ *   - 单个技能质量报告详情（维度评分、评级分布）
+ *   - 用户评分提交（1-5 星 + 文字评价）
+ *   - 自动标记低质量技能操作入口
+ */
 import { useState } from "react";
 import { useFetch } from "../hooks/useFetch.js";
 import { useToast } from "../hooks/useToast.jsx";

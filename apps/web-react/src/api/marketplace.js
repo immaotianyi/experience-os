@@ -1,5 +1,10 @@
 /**
- * Marketplace API endpoints.
+ * marketplace — 经验技能市场 API。
+ *
+ * 核心职责：
+ *   - 市场搜索（按关键词/许可/定价/排序/卖家筛选）
+ *   - Listing 详情、版本历史、下载记录
+ *   - 发布/下架/暂停 Listing、市场统计
  */
 import { getJson, postJson } from "./client.js";
 

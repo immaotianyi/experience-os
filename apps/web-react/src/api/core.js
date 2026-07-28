@@ -1,5 +1,10 @@
 /**
- * Core API endpoints — summary, validation, vault, skills, review history.
+ * core — 核心 API（总览、注意力、校验、Vault、技能、审查、撞墙）。
+ *
+ * 核心职责：
+ *   - 汇总数据（summary）、注意力信号（attention）、Vault 校验与维护
+ *   - 技能列表与审查历史、审查包/审查决策提交
+ *   - 撞墙记录与解决、审查/撞墙审计日志
  */
 import { getJson, postJson } from "./client.js";
 

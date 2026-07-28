@@ -1,3 +1,12 @@
+/**
+ * ProjectView — 项目主视图（核心协作工作台）。
+ *
+ * 核心职责：
+ *   - 项目选择/创建、LLM 状态展示
+ *   - 五阶段自主模式切换（explore→advise→draft→execute→commit）
+ *   - 证据采集、经验收据草稿审批、决策/结果记录
+ *   - 就绪状态、复用试验、捕获许可等工作流交互
+ */
 import { useEffect, useCallback, useMemo, useRef, useState } from "react";
 import { useFetch } from "../hooks/useFetch.js";
 import { IconChevronDown } from "../components/icons.jsx";

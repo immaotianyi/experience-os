@@ -1,5 +1,10 @@
 /**
- * useToast — toast queue context + hook.
+ * useToast — Toast 通知 Context + Hook。
+ *
+ * 核心职责：
+ *   - 提供 ToastProvider 管理 toast 队列（自动 3.5s 后消失）
+ *   - 暴露 toast(message, variant, title) 函数供组件调用
+ *   - 卸载时清理定时器，防止已卸载组件的状态更新
  */
 import { createContext, useContext, useState, useCallback, useRef, useEffect } from "react";
 

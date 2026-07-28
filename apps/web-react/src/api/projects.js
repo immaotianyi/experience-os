@@ -1,3 +1,11 @@
+/**
+ * projects — 项目相关 API 调用。
+ *
+ * 核心职责：
+ *   - 项目 CRUD、时间线、就绪状态查询
+ *   - 证据/经验收据/决策/结果/检查点的创建与查询
+ *   - 经验资产推广、复用建议、捕获许可审批
+ */
 import { getJson, postJson } from "./client.js";
 
 export const fetchProjects = () => getJson("/api/projects");

@@ -1,5 +1,10 @@
 /**
- * Code Graph API endpoints — 方案C integration.
+ * codeGraph — 代码图谱 API（方案C 集成）。
+ *
+ * 核心职责：
+ *   - 查询代码结构模式（枢纽/热点/循环依赖/叶子/桥接节点）
+ *   - 触发代码图谱入库分析
+ *   - 计算变更爆炸半径
  */
 import { getJson, postJson } from "./client.js";
 

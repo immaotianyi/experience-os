@@ -7,4 +7,7 @@ work/vault-archive/
 .DS_Store
 dist/
 apps/macos/EOSMenuBar/.build/
-work/experiments/*/​.eos/vault
+work/experiments/*/.eos/vault
+
+# Workspace-local EOS data created by `npm run bootstrap`
+.eos/

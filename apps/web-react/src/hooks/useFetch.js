@@ -1,6 +1,10 @@
 /**
- * useFetch — generic GET hook with loading/error/refresh.
- * Uses AbortController to cancel stale requests when URL changes.
+ * useFetch — 带 AbortController 的通用数据获取 Hook。
+ *
+ * 核心职责：
+ *   - 封装 GET 请求，返回 { data, loading, error, refresh, setData }
+ *   - URL 变化时自动取消旧请求，防止竞态（stale data overwrite）
+ *   - 重取时保留旧数据（stale-while-revalidate），避免骨架屏闪烁
  */
 import { useState, useEffect, useCallback, useRef } from "react";
 import { getJson } from "../api/client.js";

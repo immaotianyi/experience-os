@@ -1,3 +1,58 @@
+/**
+ * Validate — 领域对象字段/结构校验层，为 Vault 中所有记录类型提供统一的形状校验。
+ *
+ * 做什么：
+ *   为 EOS 2.0/3.0 的每一种领域记录类型（Project、Skill、Artifact、WallHit、Rule、
+ *   WorkflowPattern、ReflectionMemory、ReuseContext、SelfIterationRun、ReviewPacket、
+ *   ReviewDecision、PreferenceHypothesis、ConversationEvent、HumanEditLog、SubgoalSegment、
+ *   ThoughtFragment、MotherSkillTrajectory、ExperienceAsset、ExperienceReceipt/DecisionReceipt/
+ *   OutcomeRecord、EvidenceLink、ExperienceReuseTrial、BetaFeedback、WorkCheckpoint、
+ *   MarketplaceListing、Transaction、SkillRating、CodeGraphPattern、ExperienceReceiptDraft）
+ *   提供一个 validate<Type>(record) 函数，返回 string[] 类型的 issues 列表（空数组表示合法）。
+ *   另外提供 validateRecord(record) 作为 kind 分发入口、validateVault(vault) 作为全库扫描
+ *   校验入口，以及 wallTypeForIssue(issue) 将校验失败映射为 WallHit.wallType 分类。
+ *
+ * 核心抽象（三层校验）：
+ *   - 基础类型谓词（isObject / hasString / hasArray / hasNumber / hasOptionalString / isOneOf）：
+ *     纯谓词函数，不抛异常，用于组成各 record 的字段检查。
+ *   - 单记录校验器（validate<Type>）：检查必需字段存在且类型正确、枚举字段在允许集合内、
+ *     数值在范围内、跨字段一致性约束（如 Transaction.amount = commission + netToSeller、
+ *     ReviewPacket.defaultOption 必须存在于 options[].id、cycle 类型 CodeGraphPattern
+ *     的 nodeIds 长度≥2）。可选字段若存在也必须合法，不允许"有字段但值非法"。
+ *   - 跨记录/全库校验（validateVault）：遍历所有支持的 kind，加载每条记录，收集
+ *     不支持的 kind、校验失败的记录、以及无法解析的损坏文件（corruptFiles），返回
+ *     一个汇总报告 {valid, invalidCount, corruptFileCount, invalid, corruptFiles}。
+ *
+ * 关键不变量：
+ *   1. 所有 validate<Type> 函数是纯函数：不修改入参、不抛异常、返回 issues 数组。
+ *      调用方自行决定 issues 非空时是 throw 还是转为 WallHit。
+ *   2. 必需字段用 hasString/hasArray/hasNumber 等严格检查；可选字段用
+ *      "值 !== undefined 时校验" 的模式（不存在则跳过，存在则必须合法），
+ *      保证旧版本记录（缺失新字段）能向前兼容。
+ *   3. 枚举校验统一使用从 domain.js 导入的 *_STATUSES / *_TYPES 常量集合，
+ *      不硬编码枚举值，确保校验与 domain 定义单点同步。
+ *   4. wallTypeForIssue 是校验失败到 WallHit 分类的唯一映射点，覆盖 schema_missing /
+ *      trigger_unstable / safety_unclear / fallback_missing / human_confirmation_missing。
+ *
+ * 设计取舍：
+ *   - 采用"返回 issues 数组"而非"抛异常"或"返回 boolean"，因为调用场景多样：
+ *     pipeline.js 需要 throw 中止流程，validateCandidateIntoArtifact 需要转 WallHit，
+ *     validateVault 需要批量收集——返回数组让调用方决定如何处理错误。
+ *   - 不引入 JSON Schema / Zod / Joi 等外部校验库，保持零依赖；所有校验用手写谓词组合，
+ *     代码量可接受（~720 行）且与 domain factory 紧耦合便于同步演进。
+ *   - 不做业务规则校验（如"Skill 必须至少被使用过一次才能 promoted"、"Transaction 的买卖方
+ *     不能相同"），只做结构和枚举校验；业务规则由各自的引擎层负责，避免校验层膨胀为上帝模块。
+ *   - validateRecord 的 kind→validator 映射表与 validateVault 的 supportedKinds 列表
+ *     必须手动保持一致（两处都需更新），这是已知的重复；选择显式列表而非自动发现，
+ *     是为了让支持的 kind 集合在代码中可见、可审计。
+ *
+ * 不做什么：
+ *   - 不做值的规范化/类型强制转换（不把字符串"123"转数字、不 trim 用户输入）。
+ *   - 不做跨记录引用完整性检查（不验证 Skill.projectId 对应的 Project 存在）。
+ *   - 不做异步 IO（validateVault 除外，它需要加载 vault 数据），单记录校验器全部同步。
+ *   - 不做国际化/用户友好的错误消息，issues 是英文技术短语，面向开发者而非终端用户。
+ *   - 不做性能优化（如缓存编译后的 schema），记录数量级在万条以内，线性扫描足够。
+ */
 import { SKILL_STATUSES, PREFERENCE_STATUSES, REVIEW_PACKET_STATUSES, PRICING_MODELS, LICENSE_TYPES, LISTING_STATUSES, TRANSACTION_TYPES, TRANSACTION_STATUSES, AUTONOMY_MODES, PROJECT_STATUSES, EVIDENCE_TYPES, OUTCOME_STATES, EXPERIENCE_ASSET_STATUSES, EXPERIENCE_RECEIPT_DRAFT_STATUSES, CODE_GRAPH_PATTERN_TYPES } from "./domain.js";
 
 function isObject(value) {

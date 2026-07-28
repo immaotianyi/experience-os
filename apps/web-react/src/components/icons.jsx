@@ -1,6 +1,10 @@
 /**
- * Inline SVG icons — Google Material style, stroke-based, currentColor.
- * 24x24 viewBox, stroke-linecap: square, stroke-linejoin: miter for 8-bit feel.
+ * icons — 内联 SVG 图标集。
+ *
+ * 核心职责：
+ *   - 提供所有导航栏、按钮、状态标识使用的 SVG 图标组件
+ *   - 统一使用 24x24 viewBox、stroke-based、currentColor 继承
+ *   - Google Material 风格，8-bit 感（square linecap, miter linejoin）
  */
 
 const base = {

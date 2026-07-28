@@ -1,3 +1,12 @@
+/**
+ * CodeGraphView — 代码图谱视图。
+ *
+ * 核心职责：
+ *   - 展示代码结构模式（枢纽/热点/循环依赖/叶子/桥接节点）列表
+ *   - 触发代码图谱入库分析（ingest）
+ *   - 计算并展示变更爆炸半径（blast radius）
+ *   - 风险等级着色（low/medium/high/critical）
+ */
 import { useState, useCallback } from "react";
 import { useFetch } from "../hooks/useFetch.js";
 import { fetchCodeGraphPatterns, ingestCodeGraph, computeBlastRadius } from "../api/codeGraph.js";

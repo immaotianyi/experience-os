@@ -1,3 +1,12 @@
+/**
+ * OverviewView — 总览仪表盘视图。
+ *
+ * 核心职责：
+ *   - 展示 Vault 记录总数、Skill 数、审查包、撞墙数等核心指标
+ *   - 展示市场 Listing/交易/收入/评分统计
+ *   - 系统健康状态（自检管道四个关键环节）
+ *   - 最新活动、审查队列等待等概览信息
+ */
 import { useFetch } from "../hooks/useFetch.js";
 
 function StatusCard({ label, value, hint }) {

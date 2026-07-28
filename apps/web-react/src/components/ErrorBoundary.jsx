@@ -1,3 +1,11 @@
+/**
+ * ErrorBoundary — React 渲染错误边界。
+ *
+ * 核心职责：
+ *   - 捕获子组件树中的渲染错误，防止整个应用白屏
+ *   - 展示友好的错误提示卡片与"重试"按钮
+ *   - 在控制台输出错误详情用于调试
+ */
 import { Component } from "react";
 
 export default class ErrorBoundary extends Component {

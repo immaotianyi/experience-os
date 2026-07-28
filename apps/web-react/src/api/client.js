@@ -1,6 +1,10 @@
 /**
- * API client — base fetch helpers.
- * Mirrors the getJson/postJson pattern from the native app.js.
+ * client — API 客户端基础工具。
+ *
+ * 核心职责：
+ *   - 提供 getJson/postJson 两个通用 HTTP 请求函数
+ *   - 统一设置 Accept/content-type 头，自动解析 JSON
+ *   - 非 2xx 响应或 d.error 时抛出 Error
  */
 
 export async function getJson(url, { signal } = {}) {

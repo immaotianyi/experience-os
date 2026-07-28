@@ -1,3 +1,12 @@
+/**
+ * AttentionBeacon — EOS 注意力状态指示器。
+ *
+ * 核心职责：
+ *   - 每 15 秒轮询 /api/attention 获取协作状态信号
+ *   - 展示红/黄/绿状态灯和可操作的下一步建议
+ *   - 页面不可见时暂停轮询，可见时立即刷新
+ *   - 通过 onNavigate 回调跳转到对应视图
+ */
 import { useCallback, useEffect, useState } from "react";
 import { fetchAttention } from "../api/core.js";
 import { IconChevronDown, IconClose } from "./icons.jsx";

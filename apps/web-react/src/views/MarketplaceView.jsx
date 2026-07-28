@@ -1,3 +1,12 @@
+/**
+ * MarketplaceView — 经验技能市场视图。
+ *
+ * 核心职责：
+ *   - 技能市场搜索（关键词/许可/定价/排序筛选）
+ *   - Listing 卡片展示（名称/卖家/价格/许可/评分）
+ *   - 详情抽屉：版本历史、评分、购买/试用流程
+ *   - 发布/下架自己的技能到市场
+ */
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useFetch } from "../hooks/useFetch.js";
 import { useToast } from "../hooks/useToast.jsx";

@@ -1,5 +1,10 @@
 /**
- * Transaction & Pricing API endpoints.
+ * transaction — 交易与定价 API。
+ *
+ * 核心职责：
+ *   - 卖家营收汇总、交易历史查询、单笔交易详情
+ *   - 购买/试用/退款处理
+ *   - 定价明细计算、买家许可验证
  */
 import { getJson, postJson } from "./client.js";
 

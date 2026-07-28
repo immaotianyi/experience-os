@@ -1,5 +1,10 @@
 /**
- * Quality API endpoints.
+ * quality — 质量评级 API。
+ *
+ * 核心职责：
+ *   - 质量排行榜、单个技能质量报告
+ *   - 评分列表查询与评分提交
+ *   - 自动标记低质量技能
  */
 import { getJson, postJson } from "./client.js";
 
