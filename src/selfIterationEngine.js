@@ -153,16 +153,22 @@ export async function proposeSelfIterationSkills({ vault, projectId }) {
 function generateCodeGraphSkills(patterns, projectId, idSuffix) {
   if (!patterns || patterns.length === 0) return [];
 
-  const seen = new Set();
-  const skills = [];
-
+  // Group patterns by patternType so we aggregate metrics instead of skipping duplicates
+  const grouped = new Map();
   for (const pattern of patterns) {
-    const skillType = pattern.suggestedSkillType || `pattern_${pattern.patternType}`;
-    if (seen.has(skillType)) continue;
-    seen.add(skillType);
+    if (!grouped.has(pattern.patternType)) grouped.set(pattern.patternType, []);
+    grouped.get(pattern.patternType).push(pattern);
+  }
 
-    switch (pattern.patternType) {
-      case "hub":
+  const skills = [];
+  for (const [patternType, group] of grouped) {
+    const labels = group.map((p) => p.label).join(", ");
+    const patternIds = group.map((p) => p.id);
+    const bounds = [...new Set(group.flatMap((p) => p.applicabilityBounds || []))];
+
+    switch (patternType) {
+      case "hub": {
+        const maxFanIn = Math.max(...group.map((p) => p.metrics?.fanIn ?? 0));
         skills.push(createValidatedSkill({
           id: `skill.${slug(projectId)}.hub_change_impact.${idSuffix}`,
           projectId,
@@ -182,15 +188,19 @@ function generateCodeGraphSkills(patterns, projectId, idSuffix) {
           },
           skillLevel: "functional",
           notes: [
-            `来源: CodeGraphPattern ${pattern.id}`,
-            `枢纽节点 ${pattern.label} 的 fanIn=${pattern.metrics?.fanIn ?? "unknown"}`,
+            `来源: ${group.length} 个 CodeGraphPattern (${patternIds.join(", ")})`,
+            `枢纽节点: ${labels}`,
+            `最高 fanIn=${maxFanIn}`,
             "变更前必须枚举全部调用方并评估影响",
-            pattern.applicabilityBounds?.join("；") || "无适用边界声明"
+            ...bounds
           ]
         }));
         break;
+      }
 
-      case "hotspot":
+      case "hotspot": {
+        const maxFanOut = Math.max(...group.map((p) => p.metrics?.fanOut ?? 0));
+        const maxComplexity = Math.max(...group.map((p) => p.metrics?.complexity ?? 0));
         skills.push(createValidatedSkill({
           id: `skill.${slug(projectId)}.hotspot_refactor_guard.${idSuffix}`,
           projectId,
@@ -210,15 +220,18 @@ function generateCodeGraphSkills(patterns, projectId, idSuffix) {
           },
           skillLevel: "functional",
           notes: [
-            `来源: CodeGraphPattern ${pattern.id}`,
-            `热点 ${pattern.label} fanOut=${pattern.metrics?.fanOut ?? "?"} complexity=${pattern.metrics?.complexity ?? "?"}`,
+            `来源: ${group.length} 个 CodeGraphPattern (${patternIds.join(", ")})`,
+            `热点节点: ${labels}`,
+            `最高 fanOut=${maxFanOut} complexity=${maxComplexity}`,
             "重构前必须先补齐测试覆盖并拆分耦合点",
-            pattern.applicabilityBounds?.join("；") || "无适用边界声明"
+            ...bounds
           ]
         }));
         break;
+      }
 
-      case "cycle":
+      case "cycle": {
+        const maxCycleLen = Math.max(...group.map((p) => p.metrics?.cycleLength ?? 0));
         skills.push(createValidatedSkill({
           id: `skill.${slug(projectId)}.cycle_break_strategy.${idSuffix}`,
           projectId,
@@ -237,16 +250,18 @@ function generateCodeGraphSkills(patterns, projectId, idSuffix) {
           },
           skillLevel: "functional",
           notes: [
-            `来源: CodeGraphPattern ${pattern.id}`,
-            `循环: ${pattern.label}`,
-            `环长度: ${pattern.metrics?.cycleLength ?? "?"}`,
+            `来源: ${group.length} 个 CodeGraphPattern (${patternIds.join(", ")})`,
+            `循环: ${labels}`,
+            `最长环长度: ${maxCycleLen}`,
             "通过接口抽象或依赖注入打破循环",
-            pattern.applicabilityBounds?.join("；") || "无适用边界声明"
+            ...bounds
           ]
         }));
         break;
+      }
 
-      case "leaf":
+      case "leaf": {
+        const totalFanIn = group.reduce((sum, p) => sum + (p.metrics?.fanIn ?? 0), 0);
         skills.push(createValidatedSkill({
           id: `skill.${slug(projectId)}.leaf_extract_atomic.${idSuffix}`,
           projectId,
@@ -265,15 +280,19 @@ function generateCodeGraphSkills(patterns, projectId, idSuffix) {
           },
           skillLevel: "atomic",
           notes: [
-            `来源: CodeGraphPattern ${pattern.id}`,
-            `叶子节点 ${pattern.label} 被 ${pattern.metrics?.fanIn ?? "?"} 处引用`,
+            `来源: ${group.length} 个 CodeGraphPattern (${patternIds.join(", ")})`,
+            `叶子节点: ${labels}`,
+            `总被引用次数: ${totalFanIn}`,
             "叶子节点影响范围可控，适合提取为可复用原子 Skill",
-            pattern.applicabilityBounds?.join("；") || "无适用边界声明"
+            ...bounds
           ]
         }));
         break;
+      }
 
-      case "bridge":
+      case "bridge": {
+        const totalClusterA = group.reduce((sum, p) => sum + (p.metrics?.clusterASize ?? 0), 0);
+        const totalClusterB = group.reduce((sum, p) => sum + (p.metrics?.clusterBSize ?? 0), 0);
         skills.push(createValidatedSkill({
           id: `skill.${slug(projectId)}.bridge_protection_guard.${idSuffix}`,
           projectId,
@@ -293,13 +312,15 @@ function generateCodeGraphSkills(patterns, projectId, idSuffix) {
           },
           skillLevel: "functional",
           notes: [
-            `来源: CodeGraphPattern ${pattern.id}`,
-            `桥节点 ${pattern.label} 连接 ${pattern.metrics?.clusterASize ?? "?"}+${pattern.metrics?.clusterBSize ?? "?"} 节点`,
+            `来源: ${group.length} 个 CodeGraphPattern (${patternIds.join(", ")})`,
+            `桥节点: ${labels}`,
+            `连接节点总数: ${totalClusterA}+${totalClusterB}`,
             "桥节点是架构关键路径，修改前必须有替代通信方案",
-            pattern.applicabilityBounds?.join("；") || "无适用边界声明"
+            ...bounds
           ]
         }));
         break;
+      }
     }
   }
 

@@ -55,6 +55,9 @@ function PatternRow({ pattern, onBlastRadius, loadingId }) {
 }
 
 function BlastRadiusDetail({ result, pattern }) {
+  if (!result || typeof result !== "object") {
+    return <div className="empty-guide"><p>无分析结果数据</p></div>;
+  }
   return (
     <>
       <div className="detail-grid">
@@ -126,6 +129,13 @@ export default function CodeGraphView({ openDrawer, refreshKey, toast }) {
   const handleBlastRadius = useCallback(async (pattern) => {
     setLoadingId(pattern.id);
     try {
+      // Cycle patterns have nodeIds[] instead of nodeId — use first node as target
+      const targetId = pattern.nodeId || (pattern.nodeIds?.length ? pattern.nodeIds[0] : null);
+      if (!targetId) {
+        toast("此模式没有关联节点，无法评估爆炸半径", "bad", "参数错误");
+        setLoadingId(null);
+        return;
+      }
       toast("需要代码图快照来计算爆炸半径。请在下方粘贴快照 JSON。", "warn", "爆炸半径");
       const snapshotText = window.prompt("粘贴代码图快照 JSON (nodes + edges)：");
       if (!snapshotText) {
@@ -142,7 +152,7 @@ export default function CodeGraphView({ openDrawer, refreshKey, toast }) {
       }
       const result = await computeBlastRadius({
         projectId: pattern.projectId,
-        targetId: pattern.nodeId,
+        targetId,
         snapshot
       });
       openDrawer({
@@ -152,7 +162,7 @@ export default function CodeGraphView({ openDrawer, refreshKey, toast }) {
       });
       toast(`风险等级: ${result.riskLevel}，直接依赖: ${result.directDependents?.length ?? 0}`, RISK_COLORS[result.riskLevel] || "ok", "分析完成");
     } catch (err) {
-      toast(err.message, "bad", "分析失败");
+      toast(err.message || "分析过程中发生错误", "bad", "分析失败");
     } finally {
       setLoadingId(null);
     }
@@ -197,7 +207,7 @@ export default function CodeGraphView({ openDrawer, refreshKey, toast }) {
           <textarea
             value={snapshotInput}
             onChange={(e) => setSnapshotInput(e.target.value)}
-            placeholder={'{"projectId":"my-project","snapshot":{"nodes":[{"id":"fn1","type":"function","label":"handleAuth","complexity":10}],"edges":[{"source":"fn1","target":"fn2","kind":"call"}]}}'}
+            placeholder={'{"projectId":"my-project","snapshot":{"nodes":[{"id":"fn1","type":"function","label":"handleAuth","complexity":10},{"id":"fn2","type":"function","label":"validateInput","complexity":5}],"edges":[{"source":"fn1","target":"fn2","kind":"calls"}]}}'}
             style={{
               width: "100%",
               minHeight: "100px",

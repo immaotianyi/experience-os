@@ -1366,7 +1366,7 @@ async function handleApi(request, url, response) {
         patterns: result.records
       });
     } catch (error) {
-      sendJson(response, { error: error.message }, 400);
+      sendJson(response, { error: safeErrorMessage(error) }, 400);
     }
     return;
   }
@@ -1394,7 +1394,7 @@ async function handleApi(request, url, response) {
       const result = computeBlastRadius(normalizeGraphSnapshot(body.snapshot), body.targetId);
       sendJson(response, result);
     } catch (error) {
-      sendJson(response, { error: error.message }, 400);
+      sendJson(response, { error: safeErrorMessage(error) }, 400);
     }
     return;
   }

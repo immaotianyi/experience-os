@@ -17,7 +17,8 @@
  */
 
 import { createCodeGraphPattern, nowIso } from "./domain.js";
-import { slug } from "./utils.js";
+import { safeIdSlug } from "./utils.js";
+import { randomBytes } from "node:crypto";
 
 /**
  * Validate and normalize a code graph snapshot.
@@ -35,10 +36,15 @@ export function normalizeGraphSnapshot(raw) {
   const edges = Array.isArray(raw.edges) ? raw.edges : [];
   const metadata = raw.metadata && typeof raw.metadata === "object" ? raw.metadata : {};
 
+  const nodeIds = new Set();
   for (const node of nodes) {
     if (!node.id || typeof node.id !== "string") {
       throw new Error("every graph node must have a string id");
     }
+    if (nodeIds.has(node.id)) {
+      throw new Error(`duplicate graph node id: ${node.id}`);
+    }
+    nodeIds.add(node.id);
     if (!node.type || typeof node.type !== "string") {
       throw new Error(`graph node ${node.id} must have a type (function|class|module|file)`);
     }
@@ -54,10 +60,10 @@ export function normalizeGraphSnapshot(raw) {
     if (!edge.kind || typeof edge.kind !== "string") {
       throw new Error(`edge ${edge.source}→${edge.target} must have a kind (calls|imports|inherits|depends)`);
     }
-    if (!nodes.some((n) => n.id === edge.source)) {
+    if (!nodeIds.has(edge.source)) {
       throw new Error(`edge source not found in nodes: ${edge.source}`);
     }
-    if (!nodes.some((n) => n.id === edge.target)) {
+    if (!nodeIds.has(edge.target)) {
       throw new Error(`edge target not found in nodes: ${edge.target}`);
     }
   }
@@ -218,7 +224,9 @@ export function extractStructuralPatterns(snapshot, options = {}) {
  * Returns an array of cycles, each cycle being an array of node ids.
  */
 function detectCycles(snapshot) {
-  const { forward } = buildAdjacency(snapshot.edges);
+  // Filter self-referencing edges (A→A) — they are not real cycles
+  const edges = snapshot.edges.filter((e) => e.source !== e.target);
+  const { forward } = buildAdjacency(edges);
   const WHITE = 0, GRAY = 1, BLACK = 2;
   const color = new Map();
   for (const node of snapshot.nodes) color.set(node.id, WHITE);
@@ -285,7 +293,11 @@ function detectCycles(snapshot) {
 
 function normalizeCycle(cycle) {
   if (cycle.length <= 1) return cycle;
-  const minIdx = cycle.indexOf(Math.min(...cycle));
+  // Use lexicographic comparison — Math.min on strings returns NaN
+  let minIdx = 0;
+  for (let i = 1; i < cycle.length; i++) {
+    if (cycle[i] < cycle[minIdx]) minIdx = i;
+  }
   return [...cycle.slice(minIdx), ...cycle.slice(0, minIdx)];
 }
 
@@ -297,10 +309,8 @@ function normalizeCycle(cycle) {
 function detectBridges(snapshot) {
   const { forward, reverse } = buildAdjacency(snapshot.edges);
   const bridges = [];
-  const visited = new Set();
 
   for (const node of snapshot.nodes) {
-    if (visited.has(node.id)) continue;
     const fanIn = reverse.get(node.id)?.size ?? 0;
     const fanOut = forward.get(node.id)?.size ?? 0;
     // A bridge has both incoming and outgoing edges but is one of few connectors
@@ -316,7 +326,6 @@ function detectBridges(snapshot) {
           clusterASize: upstreamCluster.size,
           clusterBSize: downstreamCluster.size
         });
-        visited.add(node.id);
       }
     }
   }
@@ -340,8 +349,9 @@ export function computeBlastRadius(snapshot, targetId) {
   if (!targetId || typeof targetId !== "string") {
     throw new Error("targetId must be a non-empty string");
   }
-  const nodeExists = snapshot.nodes.some((n) => n.id === targetId);
-  if (!nodeExists) throw new Error(`target node not found: ${targetId}`);
+  // Build a Map for O(1) node lookups instead of repeated find() calls
+  const nodeMap = new Map(snapshot.nodes.map((n) => [n.id, n]));
+  if (!nodeMap.has(targetId)) throw new Error(`target node not found: ${targetId}`);
 
   const { reverse } = buildAdjacency(snapshot.edges);
 
@@ -367,29 +377,24 @@ export function computeBlastRadius(snapshot, targetId) {
   const allAffected = new Set([targetId, ...transitiveSet]);
   const affectedFiles = new Set();
   for (const nodeId of allAffected) {
-    const node = snapshot.nodes.find((n) => n.id === nodeId);
+    const node = nodeMap.get(nodeId);
     if (node?.filePath) affectedFiles.add(node.filePath);
   }
 
-  // Heuristic: estimate test scope based on affected file count
   const estimatedTestScope = Math.min(affectedFiles.size * 2, 50);
 
-  const targetNode = snapshot.nodes.find((n) => n.id === targetId);
-  const allAffectedNodes = [...allAffected].map((id) => {
-    const n = snapshot.nodes.find((node) => node.id === id);
-    return n ? { id: n.id, label: n.label, type: n.type, filePath: n.filePath } : { id };
-  });
+  const targetNode = nodeMap.get(targetId);
 
   return {
     targetId,
     targetLabel: targetNode?.label ?? targetId,
     targetType: targetNode?.type ?? "unknown",
     directDependents: directDependents.map((id) => {
-      const n = snapshot.nodes.find((node) => node.id === id);
+      const n = nodeMap.get(id);
       return { id, label: n?.label ?? id, type: n?.type ?? "unknown" };
     }),
     transitiveDependents: [...transitiveSet].map((id) => {
-      const n = snapshot.nodes.find((node) => node.id === id);
+      const n = nodeMap.get(id);
       return { id, label: n?.label ?? id, type: n?.type ?? "unknown" };
     }),
     affectedFiles: [...affectedFiles],
@@ -408,9 +413,10 @@ export function computeBlastRadius(snapshot, targetId) {
  */
 export function patternsToRecords(patterns, projectId, sourceSnapshotId) {
   const ts = Date.now();
-  return patterns.map((pattern, index) =>
-    createCodeGraphPattern({
-      id: `codegraph.${slug(projectId)}.${pattern.patternType}.${ts}.${index}`,
+  return patterns.map((pattern, index) => {
+    const random = randomBytes(4).toString("hex");
+    return createCodeGraphPattern({
+      id: `codegraph.${safeIdSlug(projectId)}.${pattern.patternType}.${ts}.${random}.${index}`,
       projectId,
       sourceSnapshotId,
       patternType: pattern.patternType,
@@ -422,8 +428,8 @@ export function patternsToRecords(patterns, projectId, sourceSnapshotId) {
       applicabilityBounds: pattern.applicabilityBounds || [],
       suggestedSkillType: pattern.suggestedSkill || null,
       capturedAt: nowIso()
-    })
-  );
+    });
+  });
 }
 
 /**
@@ -443,17 +449,23 @@ export async function ingestCodeGraphSnapshot(vault, { projectId, snapshot, sour
     throw new Error("projectId is required");
   }
   const normalized = normalizeGraphSnapshot(snapshot);
-  const snapshotId = `graph_snapshot.${slug(projectId)}.${Date.now()}`;
+  const snapshotId = `graph_snapshot.${safeIdSlug(projectId)}.${Date.now()}`;
 
   const patterns = extractStructuralPatterns(normalized);
   const records = patternsToRecords(patterns, projectId, snapshotId);
 
-  // Save all pattern records
-  for (const record of records) {
-    await vault.save(record);
+  // Save all pattern records atomically — partial saves leave inconsistent state
+  const saveAll = async () => {
+    for (const record of records) {
+      await vault.save(record);
+    }
+  };
+  if (typeof vault.withTransaction === "function") {
+    await vault.withTransaction(saveAll, { message: `[CodeGraphSnapshot] ingest: ${snapshotId}` });
+  } else {
+    await saveAll();
   }
 
-  // Save a snapshot metadata record (as a special EvidenceLink for traceability)
   const summary = {
     snapshotId,
     projectId,

@@ -168,7 +168,7 @@ const TOOLS = [
       required: ["projectId"],
       properties: {
         projectId: { type: "string" },
-        patternType: { type: "string", description: "Optional filter: hub, hotspot, cycle, leaf, or bridge." },
+        patternType: { type: "string", description: "Optional filter: hub, hotspot, cycle, leaf, or bridge.", enum: ["hub", "hotspot", "cycle", "leaf", "bridge"] },
         limit: { type: "number", minimum: 1, maximum: 100 }
       }
     },

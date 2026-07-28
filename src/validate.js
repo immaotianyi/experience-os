@@ -586,6 +586,19 @@ export function validateCodeGraphPattern(record) {
     issues.push("codeGraphPattern.nodeId must be a non-empty string when present");
   }
   if (!Array.isArray(record?.nodeIds)) issues.push("codeGraphPattern.nodeIds must be an array");
+  if (record?.suggestedSkillType !== null && record?.suggestedSkillType !== undefined && !hasString(record.suggestedSkillType)) {
+    issues.push("codeGraphPattern.suggestedSkillType must be a non-empty string when present");
+  }
+  if (record?.capturedAt !== null && record?.capturedAt !== undefined && !hasString(record.capturedAt)) {
+    issues.push("codeGraphPattern.capturedAt must be a non-empty string when present");
+  }
+  // Cycle patterns must have nodeIds with at least 2 nodes; non-cycle patterns should have nodeId
+  if (record?.patternType === "cycle" && (!record?.nodeIds || record.nodeIds.length < 2)) {
+    issues.push("codeGraphPattern.nodeIds must contain at least 2 nodes for cycle patterns");
+  }
+  if (record?.patternType !== "cycle" && !hasString(record?.nodeId)) {
+    issues.push("codeGraphPattern.nodeId is required for non-cycle patterns");
+  }
   return issues;
 }
 
