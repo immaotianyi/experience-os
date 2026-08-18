@@ -1,0 +1,100 @@
+# PolyForm Noncommercial License 1.0.0
+
+<https://polyformproject.org/licenses/noncommercial/1.0.0>
+
+## Acceptance
+
+In order to get any license under these terms, you must agree
+to them as both strict obligations and conditions to all
+your licenses.
+
+## Copyright License
+
+The licensor grants you a copyright license for the
+software to do everything that might infringe the licensor's
+copyright in the software for you to do the following,
+subject to your compliance with the terms of this license:
+
+- run the software for any permitted noncommercial purpose
+- copy, modify, and share the software, including as
+  incorporated into your noncommercial works, such as
+  changes, fixes, and configurations
+
+All licenses terminate automatically if you do not comply
+with these terms, including the copyright license above.
+
+## Patent License
+
+The licensor grants you a license to any claims of patents
+that the licensor can license, or becomes able to license,
+that necessarily and unavoidably infringe on account of
+your use of the software allowed under the copyright
+license, for your use allowed under that license. You may
+use that patent license only to the extent your use allowed
+under that copyright license would infringe those patent
+claims. That patent license terminates immediately if you
+bring any patent claim against the licensor alleging that
+the software infringes patent.
+
+## Noncommercial Purposes
+
+Any purpose is a noncommercial purpose except commerce.
+
+Commerce is any activity or work done for the purpose of,
+in furtherance of, or on behalf of any business or other
+endeavor intended for commercial or monetary gain,
+including internal use of the software within such an
+organization.
+
+Software development or maintenance is commerce if done
+for hire, or in the course of employment, or for a
+business or other endeavor intended for commercial or
+monetary gain. Software support is commerce if done for
+payment or other consideration.
+
+## Notices
+
+You must ensure that anyone who gets a copy of any part of
+the software from you also gets a copy of these terms or
+the URL for them above, as well as copies of any
+plain-text lines in the software that specify limitation
+of liability or prohibit modification (such as this
+paragraph).
+
+If you modify the software, you must include in any
+modified copies of the software prominent notices stating
+that you have modified the software.
+
+# No Liability
+
+***As far as the law allows, the software comes as is,
+without any warranty or condition, and the licensor will
+not be liable to you for any damages arising out of these
+terms or the use or nature of the software, under any kind
+of legal claim.***
+
+## Definitions
+
+The **licensor** is the individual or entity offering these
+terms, and the **software** is the software the licensor
+makes available under these terms, including any portion
+of it.
+
+**You** refers to the individual or entity agreeing to
+these terms.
+
+**Your company** means any entity that employs you or that
+you work for as a contractor, if the entity has contractual
+responsibility for the work you do.
+
+---
+
+## 中文说明（仅供参考，以英文原文为准）
+
+本项目采用 PolyForm Noncommercial 1.0.0 协议，核心规则：
+
+1. **允许**：出于非商业目的运行、复制、修改、共享本软件及其衍生作品；
+2. **禁止商用**：任何以商业或营利为目的的活动均不可使用本软件，包括企业内部使用、有偿开发、有偿维护与有偿支持；
+3. **分发义务**：再分发时必须附带本协议全文或其 URL；修改后必须在显著位置声明已修改；
+4. **无担保**：软件按"现状"提供，作者不承担任何赔偿责任；
+5. **商业授权**：如需商业使用，请单独联系作者获取商业授权。

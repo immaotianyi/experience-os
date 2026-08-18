@@ -209,3 +209,12 @@ npm test
 - **React 工作台** — 前端从原生 JS 迁移为 React 18 + Vite 5：项目入口 + 9 个高级视图（总览/市场/质量/营收/审查/撞墙/Skill库/审计/Vault维护）+ SPA 路由 + hooks 架构
 - **3.0 阶段 0** — 可信自治基础：Vault 隔离（fixtures/real 分离）+ Project/EvidenceLink/ExperienceReceipt/DecisionReceipt/OutcomeRecord schema + AutonomyMode 执行策略（5 级风险分级）+ WallHit v2 可读格式 + Capture Relay MCP（严格许可模式）+ 项目时间线 + 经验资产升级门槛
 - **3.0.0-alpha.1** — 邀请制 Alpha 基线：代码图谱 → 候选 Skill、统一身份协议、可下载 Beta 反馈、双平台测试手册、CI 和发布一致性检查
+
+## 协议（License）
+
+本项目采用 [PolyForm Noncommercial 1.0.0](LICENSE) 协议发布：
+
+- **允许**：个人学习、研究、教学等非商业目的下运行、复制、修改与共享；
+- **禁止**：任何商业使用，包括企业内部部署、有偿开发/维护/支持及一切以营利为目的的活动；
+- **分发**：再分发必须附带协议全文，修改必须显著声明；
+- **商业授权**：如需商用，请单独联系作者获取商业授权。
