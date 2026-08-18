@@ -1,6 +1,10 @@
 import { useState, useCallback } from "react";
 import { useFetch } from "../hooks/useFetch.js";
-import { submitBetaFeedback, betaFeedbackExportUrl } from "../api/beta.js";
+import {
+  submitBetaFeedback,
+  betaFeedbackExportUrl,
+  getOrCreateBetaParticipantId
+} from "../api/beta.js";
 
 const STAGES = [
   { id: "first_impression", label: "初次印象" },
@@ -55,8 +59,11 @@ export default function BetaFeedbackView({ refreshKey, toast }) {
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [participantId] = useState(() => getOrCreateBetaParticipantId());
 
   const feedbackList = data?.records ?? [];
+  const storageScope = result?.storageScope ?? data?.storageScope ?? "local";
+  const canExport = result?.canExport ?? data?.canExport ?? false;
   const exportUrl = betaFeedbackExportUrl();
 
   const handleSubmit = useCallback(async (e) => {
@@ -70,6 +77,7 @@ export default function BetaFeedbackView({ refreshKey, toast }) {
     try {
       const res = await submitBetaFeedback({
         consent: true,
+        participantId,
         stage,
         usefulness,
         clarity,
@@ -87,7 +95,7 @@ export default function BetaFeedbackView({ refreshKey, toast }) {
     } finally {
       setSubmitting(false);
     }
-  }, [consent, stage, usefulness, clarity, wouldUseAgain, helped, blocked, contactConsent, contact, toast, refresh]);
+  }, [consent, participantId, stage, usefulness, clarity, wouldUseAgain, helped, blocked, contactConsent, contact, toast, refresh]);
 
   const resetForm = () => {
     setResult(null);
@@ -109,18 +117,24 @@ export default function BetaFeedbackView({ refreshKey, toast }) {
         <div className="beta-success">
           <h2>反馈已提交</h2>
           <p className="muted">记录 ID：{result.id}</p>
-          <p>你的反馈已存入本地 Vault，不会上传云端。</p>
+          <p>
+            {storageScope === "local"
+              ? "你的反馈已存入本地 Vault，不会自动上传。"
+              : "你的反馈已提交到本次 Beta 测试服务。"}
+          </p>
           <div className="beta-actions">
             <button className="btn" onClick={resetForm}>再写一条</button>
-            <a className="btn btn-outline" href={exportUrl} target="_blank" rel="noopener noreferrer">
-              导出全部反馈
-            </a>
+            {canExport && (
+              <a className="btn btn-outline" href={exportUrl} download>
+                下载反馈文件
+              </a>
+            )}
           </div>
         </div>
-        {feedbackList.length > 0 && (
+        {canExport && feedbackList.length > 0 && (
           <div className="beta-history">
             <h3>已提交反馈（{feedbackList.length}）</h3>
-            <a className="btn btn-sm" href={exportUrl} target="_blank" rel="noopener noreferrer">
+            <a className="btn btn-sm" href={exportUrl} download>
               导出 JSON
             </a>
           </div>
@@ -134,8 +148,10 @@ export default function BetaFeedbackView({ refreshKey, toast }) {
       <div className="beta-intro">
         <h2>Beta 反馈</h2>
         <p className="muted">
-          这是一条自愿的产品体验报告。提交前请勾选同意。反馈仅存入本地 Vault，
-          不会自动上传云端。如需交给测试组织者，请使用下方"导出"功能。
+          这是一条自愿的产品体验报告。提交前请勾选同意。
+          {storageScope === "local"
+            ? "反馈仅存入本地 Vault；完成后可下载文件交给测试组织者。"
+            : "反馈将提交到本次 Beta 测试服务，其他参与者无法读取。"}
         </p>
         <p className="muted" style={{ fontSize: "12px" }}>
           不含聊天记录、密码、API Key 或个人数据。参与者 ID 默认匿名生成。
@@ -228,10 +244,10 @@ export default function BetaFeedbackView({ refreshKey, toast }) {
         </button>
       </form>
 
-      {feedbackList.length > 0 && (
+      {canExport && feedbackList.length > 0 && (
         <div className="beta-history">
           <span>已提交 {feedbackList.length} 条反馈</span>
-          <a className="btn btn-sm btn-outline" href={exportUrl} target="_blank" rel="noopener noreferrer">
+          <a className="btn btn-sm btn-outline" href={exportUrl} download>
             导出 JSON
           </a>
         </div>

@@ -16,6 +16,7 @@ export const KIND_LABELS = {
   ConversationEvent: "协作片段",
   WorkCheckpoint: "工作节点",
   ExperienceReceipt: "经验收据",
+  ExperienceReceiptDraft: "收据草案",
   DecisionReceipt: "审查决策",
   OutcomeRecord: "实际结果",
   Skill: "Skill",

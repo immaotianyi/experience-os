@@ -24,5 +24,30 @@ describe("buildAttentionSnapshot", () => {
     });
     assert.deepEqual(snapshot.signals.map((item) => item.level), ["green", "green", "amber"]);
     assert.deepEqual(snapshot.actions, []);
+    assert.equal(snapshot.overall.state, "idle");
+  });
+
+  it("prioritizes host permission over working activity", () => {
+    const snapshot = buildAttentionSnapshot({
+      permits: [], drafts: [], reviewPackets: [], wallHits: [],
+      agents: [
+        { id: "codex", state: "working", evidenceLevel: 4 },
+        { id: "claude", state: "waiting_permission", evidenceLevel: 4 }
+      ],
+      llm: { isLive: true, adapter: "deepseek", model: "deepseek-chat" }
+    });
+    assert.equal(snapshot.overall.state, "waiting_permission");
+    assert.equal(snapshot.agentSummary.working, 1);
+    assert.equal(snapshot.agentSummary.waitingPermission, 1);
+    assert.equal(snapshot.actions[0].id, "agent-permissions");
+  });
+
+  it("uses recent verified agent activity when no human action blocks it", () => {
+    const snapshot = buildAttentionSnapshot({
+      permits: [], drafts: [], reviewPackets: [], wallHits: [],
+      agents: [{ id: "codex", state: "working", evidenceLevel: 4 }],
+      llm: { isLive: true, adapter: "deepseek", model: "deepseek-chat" }
+    });
+    assert.equal(snapshot.overall.state, "working");
   });
 });

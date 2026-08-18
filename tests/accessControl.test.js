@@ -15,7 +15,8 @@ import {
   canDelete,
   canReview,
   filterReadable,
-  contextFromRequest
+  contextFromRequest,
+  hasPrivilegedAccess
 } from "../src/accessControl.js";
 
 describe("applyOwnership", () => {
@@ -57,6 +58,11 @@ describe("canRead", () => {
     assert.equal(canRead(record, { userId: "user2" }), false);
   });
 
+  it("allows admin to read private records", () => {
+    const record = { ownerId: "user1", visibility: VISIBILITY.PRIVATE };
+    assert.equal(canRead(record, { userId: "admin1", role: ROLES.ADMIN }), true);
+  });
+
   it("allows anyone to read public record", () => {
     const record = { ownerId: "user1", visibility: VISIBILITY.PUBLIC };
     assert.equal(canRead(record, { userId: "user2" }), true);
@@ -92,6 +98,11 @@ describe("canEdit", () => {
     const record = { ownerId: "user1", visibility: VISIBILITY.TEAM };
     assert.equal(canEdit(record, { userId: "user2", role: ROLES.VIEWER }), false);
   });
+
+  it("allows admin to edit private records", () => {
+    const record = { ownerId: "user1", visibility: VISIBILITY.PRIVATE };
+    assert.equal(canEdit(record, { userId: "admin1", role: ROLES.ADMIN }), true);
+  });
 });
 
 describe("canDelete", () => {
@@ -105,6 +116,10 @@ describe("canDelete", () => {
 
   it("blocks non-owner from deleting", () => {
     assert.equal(canDelete({ ownerId: "user1" }, { userId: "user2", role: ROLES.EDITOR }), false);
+  });
+
+  it("allows admin to delete records", () => {
+    assert.equal(canDelete({ ownerId: "user1" }, { userId: "admin1", role: ROLES.ADMIN }), true);
   });
 });
 
@@ -123,6 +138,10 @@ describe("canReview", () => {
 
   it("blocks viewer from reviewing", () => {
     assert.equal(canReview({ ownerId: "user1" }, { userId: "user2", role: ROLES.VIEWER }), false);
+  });
+
+  it("allows admin to review", () => {
+    assert.equal(canReview({ ownerId: "user1" }, { userId: "admin1", role: ROLES.ADMIN }), true);
   });
 });
 
@@ -158,6 +177,7 @@ describe("contextFromRequest", () => {
     });
     assert.equal(ctx.userId, "user1");
     assert.equal(ctx.role, ROLES.EDITOR);
+    assert.equal(ctx.visibility, VISIBILITY.PRIVATE);
   });
 
   it("defaults role to viewer", () => {
@@ -166,14 +186,61 @@ describe("contextFromRequest", () => {
     });
     assert.equal(ctx.role, ROLES.VIEWER);
   });
+
+  it("parses the canonical x-eos-identity header", () => {
+    const ctx = contextFromRequest({
+      headers: {
+        "x-eos-identity": JSON.stringify({
+          userId: "admin1",
+          role: "admin",
+          visibility: "team"
+        })
+      }
+    });
+    assert.deepEqual(ctx, {
+      userId: "admin1",
+      role: ROLES.ADMIN,
+      visibility: VISIBILITY.TEAM
+    });
+  });
+
+  it("fails closed for malformed canonical identity", () => {
+    assert.throws(
+      () => contextFromRequest({ headers: { "x-eos-identity": "not-json" } }),
+      /must be valid JSON/
+    );
+  });
+
+  it("rejects unknown roles", () => {
+    assert.throws(
+      () => contextFromRequest({
+        headers: {
+          "x-eos-identity": JSON.stringify({ userId: "user1", role: "superuser" })
+        }
+      }),
+      /role is invalid/
+    );
+  });
 });
 
 describe("constants", () => {
-  it("ROLES has 3 roles", () => {
-    assert.equal(Object.keys(ROLES).length, 3);
+  it("ROLES has 4 roles", () => {
+    assert.equal(Object.keys(ROLES).length, 4);
   });
 
   it("VISIBILITY has 3 levels", () => {
     assert.equal(Object.keys(VISIBILITY).length, 3);
+  });
+});
+
+describe("hasPrivilegedAccess", () => {
+  it("allows trusted local mode without an identity", () => {
+    assert.equal(hasPrivilegedAccess(null, { localMode: true }), true);
+  });
+
+  it("requires admin outside local mode", () => {
+    assert.equal(hasPrivilegedAccess({ userId: "owner1", role: ROLES.OWNER }), false);
+    assert.equal(hasPrivilegedAccess({ userId: "admin1", role: ROLES.ADMIN }), true);
+    assert.equal(hasPrivilegedAccess(null), false);
   });
 });

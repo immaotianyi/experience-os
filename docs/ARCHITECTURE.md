@@ -8,7 +8,7 @@ Experience OS 是一个单进程 Node.js 应用，将人-AI 协作过程中的�
 ┌─────────────────────────────────────────────────────┐
 │ 集成层                                               │
 │  webServer.js (HTTP)  │  eosRelayMcp.js (MCP/stdio) │
-│  eosPlatformAdapter (tray/cloud/codex 检测)          │
+│  eosPlatformAdapter (宿主证据) · onboardingDiscovery │
 ├─────────────────────────────────────────────────────┤
 │ 引擎层                                               │
 │  projectEngine · pipeline · reviewEngine ·          │
@@ -30,14 +30,14 @@ Experience OS 是一个单进程 Node.js 应用，将人-AI 协作过程中的�
 - **存储层**：`Vault` 提供原子 JSON 文件读写；`GitVault` 在此基础上叠加自动 Git commit、历史查询、回滚、写锁和事务。
 - **领域层**：`domain.js` 定义所有 record kind 的工厂函数和枚举；`stateMachine.js` 管理 Project 管道状态转换；`validate.js` 做字段校验；`executionPolicy.js` 管控 AI 自治权限；`accessControl.js` 管理多用户读写权限。
 - **引擎层**：每个引擎模块负责一个业务域，通过 Vault 的 save/load/list/search 接口持久化数据，不直接操作文件系统。
-- **集成层**：`webServer.js` 是 HTTP 入口（React 前端 + REST API）；`eosRelayMcp.js` 是 MCP stdio 入口（供 Codex 等工具调用）；`eosPlatformAdapter` 检测外部集成面状态。
+- **集成层**：`webServer.js` 是 HTTP 入口（React 前端 + REST API）；`eosRelayMcp.js` 是 MCP stdio 入口（供 Codex、Claude Code、Cursor、TRAE、VS Code 调用）；`eosMcpProbe.js` 做真实协议握手；`eosPlatformAdapter` 只按宿主安装、配置、可调用和事件回执证据报告状态。详见 [AI 工具集成架构](INTEGRATION_ARCHITECTURE.md)。
 
 ## 核心数据流
 
-从用户启动 Codex 会话到经验沉淀的端到端流程：
+从用户在任一已验收 AI 宿主中开始协作，到经验沉淀的端到端流程：
 
 ```
-用户在 Codex 中与 AI 协作
+用户在 Codex / Claude Code / Cursor / TRAE / VS Code 中与 AI 协作
         │
         ▼
 eosRelayMcp.js (MCP Server)
@@ -120,10 +120,11 @@ vault.js ──► gitVault.js ──► projectEngine.js ──► webServer.js
                   │
                   └──► eosBootstrap.js
                   └──► eosWorkbench.js
-                  └──► eosPlatformAdapter.js ──► eosCodexPreflight.js
+                  └──► eosMcpProbe.js ──► eosPlatformAdapter.js
+                                           └──► eosCodexPreflight.js
                   └──► alphaEvidence.js
                   └──► vaultMaintenance.js
-                  └──► attentionStatus.js
+                  └──► agentStatus.js ──► attentionStatus.js
                   └──► betaFeedback.js
 
 utils.js 被所有模块共享
@@ -139,7 +140,7 @@ vaultPath.js 被 gitVault / webServer / eosRelayMcp / eosBootstrap 使用
 
 ### 1. 为什么用本地 JSON 文件而非数据库
 
-**Context**：EOS 需要持久化 28+ 种领域记录，且要求数据对用户透明、可审计、可回滚、零运维。
+**Context**：EOS 需要持久化 31 种领域记录，且要求数据对用户透明、可审计、可回滚、零运维。
 
 **Decision**：每种 record kind 对应一个子目录，每条记录对应一个 `${id}.json` 文件；不使用 SQLite/PostgreSQL 等数据库。
 
@@ -174,17 +175,22 @@ vaultPath.js 被 gitVault / webServer / eosRelayMcp / eosBootstrap 使用
 - 副作用（持久化、通知、引擎调度）不在 transition 内触发，由调用方（projectEngine/pipeline）在转换成功后编排。
 - 非法转换不会静默失败，错误会冒泡到全局错误处理，便于发现管道逻辑 bug。
 
-### 4. 为什么身份通过 HTTP Header 传递而非 JWT
+### 4. 为什么本地身份与云端授权必须分层
 
-**Context**：EOS 默认绑定 `127.0.0.1`，仅供本机访问；云端部署需前置反向代理鉴权。
+**Context**：EOS 默认绑定 `127.0.0.1`，本地核心不应因账号系统不可用而停摆；云同步、市场和跨设备能力又需要稳定身份。
 
-**Decision**：身份通过 `x-eos-identity` 请求头传递（JSON 格式：`{"userId":"...","role":"owner|editor|viewer|admin","visibility":"private|team|public"}`），不使用 JWT/session/cookie。
+**Decision**：
+- 本地 Vault 与宿主接入继续使用回环单用户信任边界，不强制登录。
+- 首次启动支持中国大陆手机号和邮箱验证码；开发模式使用进程内 OTP 与 HttpOnly cookie，只验证交互闭环。
+- 生产身份由可替换 provider 或受信 OIDC/反向代理提供，再通过 `x-eos-identity` 进入现有授权模型。
+- EOS 不保存密码，也不在未配置 provider 时伪造短信或邮件发送成功。
 
 **Consequences**：
-- 本地单用户模式下零侵入：不带头时默认为 `system` 用户 + `owner` 角色 + `private` 可见性。
-- 多用户模式或云端部署时，反向代理（Nginx/Caddy）负责鉴权并注入身份头，EOS 本身不处理密码/OAuth。
-- 不做签名/验签：信任来自反向代理或本地进程的头。本地模式下 127.0.0.1 绑定已足够安全。
-- 实现简单：`contextFromRequest()` 只做 JSON.parse 和字段提取，无 token 验证开销。
+- 本地单用户模式下零侵入：服务默认只绑定回环地址；无身份请求使用单用户兼容路径，记录默认归属 `system` 且可见性为 `private`。
+- 验证码服务失败不会阻断本地工作，但云同步、市场身份和跨设备功能必须保持锁定。
+- 多用户模式或云端部署时，身份 provider/反向代理负责账号安全并注入身份头；业务授权仍由 `accessControl.js` 统一判断。
+- 旧客户端的 `x-user-id/x-user-role/x-user-visibility` 在迁移期继续可用；显式但非法的身份头会失败关闭。
+- 开发 OTP 会话在重启后失效；它不是生产账号存储。生产部署必须保证后端端口不直接暴露，只接受可信身份层流量。
 
 ### 5. 为什么 Vault 不做 schema 校验
 
@@ -210,6 +216,23 @@ vaultPath.js 被 gitVault / webServer / eosRelayMcp / eosBootstrap 使用
 - 对 EOS 的数据规模（单 Vault < 10k 条记录）性能足够：list + score 在毫秒级。
 - 不支持同义词、词干提取、向量语义搜索；未来需要语义检索时可在 search() 上层包装 embedding 检索，调用方接口不变。
 
+### 7. 为什么宿主观察从低频元数据开始
+
+**Context**：EOS 需要证明 Codex、Claude Code 等宿主中的协作确实发生，但“宿主支持 Hook”
+不等于用户同意上传提示词、工具输入输出或 transcript。不同宿主的 Hook 契约也会演进。
+
+**Decision**：
+- 独立使用 `HostObservationConsent`，不复用正文捕获许可；许可固定为 `metadata_only` 且可撤销。
+- 第一阶段只为已按官方文档验收的 Codex 与 Claude Code 生成 `SessionStart` / `SessionEnd` Hook。
+- Hook Bridge 在本地进程内删除正文与路径、散列不透明 ID，并只允许发往 HTTP 回环地址。
+- 许可 ID 只作审计引用；调用凭据原值位于工作区外 `0600` 文件，Vault 只保存 SHA-256。
+- 配置先生成差异供人审查，经第二次确认后在锁内与私有凭据一起原子提交、验证和回滚；只合并或移除 EOS 自己的 Hook。
+- Cursor 契约未验收时返回 `unverified`，不生成猜测配置。
+- 只有 `HostObservation` 能构成 L4，且必须先满足 MCP 可调用的 L3 证据。
+
+**Consequences**：EOS 能先证明跨宿主的真实接入，同时不把“记录一切”当成默认能力。未来增加
+turn/tool 事件时，必须逐事件评估输入敏感度、用户收益、负载与降级行为，并新增契约测试。
+
 ## 跨模块不变量
 
 1. **ID 格式白名单**：所有 `record.id` 必须匹配 `[a-zA-Z0-9._-]+`（`SAFE_ID_RE`），防止路径穿越。ID 通常以 `<kind_prefix>.<content>` 格式生成（如 `project.experience_os`、`artifact.project_x.skill_y.1784273000311`）。
@@ -220,7 +243,7 @@ vaultPath.js 被 gitVault / webServer / eosRelayMcp / eosBootstrap 使用
 
 4. **kind 字段一致性**：每条记录的 `kind` 字段必须与 COLLECTION_DIR 的键名一致（如 `kind: "Project"` 对应 `projects/` 目录）。
 
-5. **写操作需身份**：所有写端点必须经 `contextFromRequest()` 提取身份，并通过 `accessControl.canEdit()`/`applyOwnership()` 校验；单用户模式下默认为 system/owner。
+5. **高风险操作需特权身份**：非本地的平台进程启动、含 PII 的反馈导出等操作要求 admin；普通记录操作按所有权与可见性校验，本地回环模式保留单用户零配置路径。
 
 6. **错误不泄露内部信息**：HTTP 错误响应经 `safeErrorMessage()` 过滤，500 错误只返回 "Internal server error"，不暴露堆栈/文件路径。
 

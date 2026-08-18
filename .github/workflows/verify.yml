@@ -1,0 +1,35 @@
+name: Verify
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: apps/web-react/package-lock.json
+      - name: Install web dependencies
+        run: npm --prefix apps/web-react ci
+      - name: Verify core behavior
+        run: npm run verify
+      - name: Build workbench
+        run: npm run web:build
+      - name: Check release consistency
+        run: npm run release:check

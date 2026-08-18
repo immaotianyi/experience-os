@@ -70,12 +70,19 @@ export default function AttentionBeacon({ refreshKey, onNavigate }) {
 
   return (
     <aside className={`attention-beacon ${expanded ? "expanded" : ""}`} aria-label="EOS 协作状态">
-      {expanded && (
-        <section className="attention-panel" aria-live="polite">
+        <section
+          className="attention-panel"
+          aria-live="polite"
+          aria-hidden={!expanded}
+          {...(!expanded ? { inert: "" } : {})}
+        >
           <header className="attention-panel-head">
-            <div>
-              <p className="eyebrow">EOS 状态</p>
-              <h2>{blockingCount ? "需要你的判断" : actions.length ? "有可跟进事项" : "当前流程清空"}</h2>
+            <div className="attention-panel-brand">
+              <img src="/eos-logo.png" alt="" aria-hidden="true" />
+              <div>
+                <p className="eyebrow">EOS 状态</p>
+                <h2>{blockingCount ? "需要你的判断" : actions.length ? "有可跟进事项" : "当前流程清空"}</h2>
+              </div>
             </div>
             <button className="icon-button attention-close" type="button" title="收起状态栏" aria-label="收起状态栏" onClick={() => setExpanded(false)}><IconClose /></button>
           </header>
@@ -103,7 +110,6 @@ export default function AttentionBeacon({ refreshKey, onNavigate }) {
             <p className="attention-clear">没有需要你立即处理的事项。EOS 会继续保持观察，而不会打断你的工作。</p>
           )}
         </section>
-      )}
       <button
         type="button"
         className="attention-trigger"
@@ -112,6 +118,7 @@ export default function AttentionBeacon({ refreshKey, onNavigate }) {
         aria-expanded={expanded}
         onClick={() => setExpanded((value) => !value)}
       >
+        <img className="attention-trigger-logo" src="/eos-logo.png" alt="" aria-hidden="true" />
         <span className="attention-trigger-label">EOS</span>
         <span className="attention-lights" aria-hidden="true">
           {signals.map((item) => <span key={item.id} className={`attention-dot ${item.level}`} />)}

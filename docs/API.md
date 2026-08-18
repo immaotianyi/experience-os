@@ -3,16 +3,18 @@
 ## API 约定
 
 - **基础 URL**: `http://127.0.0.1:4173`（可通过 `PORT` 环境变量修改端口，`EOS_HOST` 修改绑定地址）
-- **认证**: 通过 `x-eos-identity` HTTP Header 传递身份，值为 JSON：
+- **认证**: 非本地部署由可信反向代理通过 `x-eos-identity` HTTP Header 传递身份，值为 JSON：
   ```json
   {"userId":"alice","role":"owner|editor|viewer|admin","visibility":"private|team|public"}
   ```
-  不带头时默认为 `{"userId":"system","role":"owner","visibility":"private"}`（单用户模式）。
+  `x-user-id` / `x-user-role` / `x-user-visibility` 仅用于旧客户端迁移。身份头格式错误会返回 400，不会降级成无约束身份。
+  本地模式默认只绑定回环地址，并把无身份请求视为可信单用户操作；非本地高风险操作要求 admin。
+  首次启动的手机/邮箱验证码使用 `HttpOnly; SameSite=Strict` 会话 cookie；它不会替代本地回环信任边界。未配置生产身份提供方时，EOS 会失败关闭验证码发送，但仍允许“仅本地使用”。
 - **Content-Type**: POST/PUT 请求必须为 `application/json`，否则返回 415。
 - **请求体大小**: 上限 1 MiB，超出返回 413。
 - **错误响应**: 统一格式 `{"error": "<message>"}`，HTTP 状态码 4xx/5xx。500 错误不泄露堆栈信息。
 - **分页**: 列表端点通过 `?limit=N` 控制返回条数，上限 500（默认 24）；`?offset` 不支持，全量加载后由客户端分页。
-- **限流**: 仅 `POST /api/beta-feedback` 有 IP 级限流（每小时每 IP 5 条，返回 429），其他端点无限流。
+- **限流**: `POST /api/beta-feedback` 有 IP 级限流（每小时每 IP 5 条）；验证码对每个身份执行 60 秒冷却、10 分钟最多 3 次、最多 5 次校验失败。
 - **CORS**: 本地模式 `Access-Control-Allow-Origin: *`（因绑定 127.0.0.1）。
 
 ## 端点分组
@@ -30,27 +32,90 @@
 
 ---
 
-### 平台集成
+### 首次启动与身份
+
+#### `GET /api/auth/status`
+
+返回身份能力、是否允许本地跳过、生产 provider 状态与当前会话。`productionReady=false` 时不得把本机开发验证码描述为真实账号。
+
+#### `POST /api/auth/request-code`
+
+请求中国大陆手机号或邮箱验证码。
+
+请求体：`{"channel":"phone|email","identifier":"13800138000|name@example.com"}`。
+
+仅当已配置真实 provider，或本地显式设置 `EOS_AUTH_DEV_OTP=1` 时可用。开发模式响应包含 `devCode`，生产响应不得包含原始验证码。
+
+#### `POST /api/auth/verify-code`
+
+请求体：`{"channel":"phone|email","identifier":"...","code":"123456"}`。
+
+成功后写入 `eos_session` HttpOnly cookie，响应只返回掩码身份和会话元数据，不返回 token。
+
+#### `POST /api/auth/logout`
+
+注销当前验证码会话并清除 cookie。本地 Vault 仍可继续使用。
+
+#### `POST /api/onboarding/scan-hosts`
+
+请求体：`{"consent":true}`。检测五类宿主的安装、版本和 EOS 连接证据，不读取项目、聊天或源码正文。
+
+#### `POST /api/onboarding/discover-projects`
+
+请求体：`{"consent":true,"hosts":["codex","claude"]}`。仅从所选宿主的结构化元数据中读取项目路径，并检查有限的工程标记。
+
+#### `POST /api/onboarding/inspect-manual`
+
+请求体：`{"consent":true,"path":"/absolute/project/path"}`。检查一个用户主动提供的绝对路径；拒绝磁盘根、主目录、桌面和文档目录。
+
+#### `GET /api/workspaces`
+
+列出 `~/.experience-os/workspaces.json` 中的本机工作区，并重新验证每个 `.eos` 工作台是否可用。
+
+#### `POST /api/workspaces/connect`
+
+请求体：
+
+```json
+{
+  "consent": true,
+  "confirmWrites": true,
+  "projects": [{"path": "/absolute/project", "sourceHosts": ["codex"]}]
+}
+```
+
+最多 30 个项目，服务端严格串行处理。已有 `.eos/` 只注册，未初始化项目才执行 Bootstrap。部分失败返回 207，并分别列出 `connected` 与 `failed`。
+
+---
+
+### AI 宿主集成
 
 #### `GET /api/platforms`
 
-检测 tray/work/vault/codex/cloud 五个集成面的健康状态。
+检测 Codex、Claude Code、Cursor、TRAE、VS Code 五个真实 AI 宿主的连接证据。
 
-响应：`{"platforms": {"tray": {...}, "work": {...}, "vault": {...}, "codex": {...}, "cloud": {...}}}`
+每个宿主包含：
+
+- `status`: `not_installed|available|configured|callable|observing|error`
+- `compatibilityLevel`: `0..4`
+- `proof`: `hostInstalled/mcpRegistered/relayConformant/hostConfirmed/vaultBound/eventObserved`
+- `details`: 版本、配置位置、当前 Vault 与 Relay 握手结果
+
+响应：`{"platforms": {"codex": {...}, "claude": {...}, "cursor": {...}, "trae": {...}, "vscode": {...}}, "relay": {...}, "summary": {...}}`
 
 #### `POST /api/platforms/:name/start`
 
-启动指定平台组件。需要认证（401 未认证）。
+生成指定宿主的人工审查连接方案。为兼容旧客户端保留 `/start` 路径，但不会启动应用，也不会静默修改外部配置。本地回环模式允许 Vault 所有者使用；非本地部署需要 admin。
 
 请求体：`{}`（启动参数因平台而异）
 
-响应：`{"started": true|false, "message": "..."}`
+响应：`{"started": false, "action": "human_configuration_required", "message": "...", "command|config": ..., "configPath": "..."}`
 
 #### `GET /api/platforms/:name/diagnose`
 
 对指定平台运行诊断。
 
-响应：`{"status": "ok|error", "healthy": true|false, "advice": [...], "result": ...}`
+响应：`{"status": "<evidence-status>", "healthy": true|false, "advice": [...], "result": ...}`。只有 L3 及以上 `healthy=true`。
 
 ---
 
@@ -62,20 +127,20 @@
 
 请求体：
 ```json
-{"participantId": "...", "stage": "...", "usefulness": 1-5, "clarity": 1-5, "wouldUseAgain": true|false, "helped": "...", "blocked": "...", "contact": "email|null"}
+{"consent": true, "participantId": "...", "stage": "first_impression|after_trying|blocked", "usefulness": 1-5, "clarity": 1-5, "wouldUseAgain": "yes|no|unsure", "helped": "...", "blocked": "...", "contactConsent": false, "contact": ""}
 ```
 
-响应：`{"ok": true, "id": "beta_feedback...."}` (201)
+响应：`{"ok": true, "id": "beta_feedback....", "participantId": "...", "storageScope": "local|service", "canExport": true|false}` (201)
 
 #### `GET /api/beta-feedback`
 
-列出最近 100 条反馈。非 admin 用户的响应中 `contact` 字段被移除。
+本地模式列出当前 Vault 最近 100 条反馈。远端普通参与者不能枚举其他测试者的反馈，只有 admin 可以读取。
 
-响应：`{"kind": "BetaFeedback", "records": [...]}`
+响应：`{"kind": "BetaFeedback", "records": [...], "canExport": true|false, "storageScope": "local|service"}`
 
 #### `GET /api/beta-feedback/export`
 
-导出全部反馈（含 PII）。需要 admin 角色（403 否则）。
+下载全部反馈。回环本地模式允许 Vault 所有者导出；非本地部署需要 admin 角色（403 否则）。
 
 响应：`{"exportedAt": "...", "count": N, "feedback": [...]}`
 
@@ -170,9 +235,19 @@ Git 仓库统计。
 
 #### `GET /api/attention`
 
-聚合待处理事项：待审草稿、审查包、WallHit、捕获许可、LLM 状态。
+聚合全局灯态、逐 Agent 近期活动、待审草稿、审查包、WallHit、捕获许可和 LLM 状态。Agent 只有在当前 Vault 达到 L3 可调用且存在时间有效的元数据事件时，才可能显示为 `working`、`waiting_permission`、`completed` 或 `blocked`。
 
-响应：`{"drafts": [...], "reviewPackets": [...], "wallHits": [...], "permits": [...], "llm": {...}}`
+响应核心字段：
+
+```json
+{
+  "overall": { "state": "idle|working|waiting_permission|waiting_review|completed|blocked", "label": "...", "detail": "..." },
+  "agents": [{ "id": "codex", "label": "Codex", "state": "disconnected", "stateLabel": "待验收", "evidenceLevel": 2, "lastEvent": null }],
+  "agentSummary": { "installed": 4, "working": 0, "waitingPermission": 0, "completed": 0, "blocked": 0, "callable": 0, "observing": 0 },
+  "signals": [],
+  "actions": []
+}
+```
 
 ---
 
@@ -861,6 +936,46 @@ WallHit 审计视图。
 请求体：`{"packetId": "...", "userId": "..."}`
 
 响应：`{"ok": true, "decision": {...}, "packet": ReviewPacket}`
+
+---
+
+### 宿主元数据观察
+
+#### `POST /api/host-observation-consents`
+
+为一个项目和宿主建立可撤销的元数据观察许可。本地 owner 操作，且
+`metadataOnlyAcknowledged` 必须显式为 `true`。
+
+请求体：`{"projectId":"project.x","host":"codex|claude","approvedBy":"human","metadataOnlyAcknowledged":true}`
+
+响应包含许可记录和本次授权新生成的 `captureToken`。Vault 只保存其 SHA-256；原值只用于随后建立 Hook 计划，不应记录或复用到其他项目。
+
+#### `POST /api/platforms/:host/hook-plan`
+
+基于有效许可生成项目级 Hook 合并片段。该端点只预览、不写宿主配置；Codex 与 Claude Code
+当前仅启用 `SessionStart` / `SessionEnd`；Cursor 等未验收契约返回失败关闭状态。
+
+请求体：`{"consentId":"host_consent...","captureToken":"host_capture..."}`
+
+#### `POST /api/platforms/:host/hook-apply`
+
+对服务端保存的单次计划执行二次确认。事务会锁定并复核宿主配置与私有凭据，只合并 EOS Hook，原子写入并验证；失败时在无外部并发修改的前提下同时回滚。
+
+请求体：`{"planId":"host-hook-plan...","approved":true,"confirmedScope":"metadata_only_session_lifecycle"}`
+
+#### `POST /api/platforms/:host/hook-remove-plan` / `hook-remove-apply`
+
+先预览，再经相同范围的二次确认撤销许可，并只移除 EOS Hook 与工作区外私有凭据。其他宿主设置与 Hook 保持不变。
+
+#### `POST /api/host-observations`
+
+供本机 Hook Bridge 提交已归一化的白名单元数据。`consentId` 是可审计引用，独立的
+`captureToken` 才是本地调用凭据；服务端按 Vault 中的哈希做常量时间校验。
+原始提示词、回复、工具参数、源码、cwd 和 transcript 路径不允许进入该记录。
+
+#### `GET /api/host-observation-consents` / `GET /api/host-observations`
+
+按 `projectId` 查询许可或观察证据；观察列表可附加 `host` 与 `limit`。
 
 ---
 

@@ -16,6 +16,8 @@ import {
   nowIso,
   createProject,
   createConversationEvent,
+  createHostObservationConsent,
+  createHostObservation,
   createThoughtFragment,
   createRule,
   createSkillCandidate,
@@ -94,6 +96,35 @@ describe("createConversationEvent", () => {
   });
 });
 
+describe("host observation records", () => {
+  it("keeps metadata consent separate from collaboration content consent", () => {
+    const consent = createHostObservationConsent({
+      id: "host_consent.p1.codex",
+      projectId: "p1",
+      host: "codex",
+      approvedBy: "human"
+    });
+    assert.equal(consent.scope, "metadata_only");
+    assert.equal(consent.status, "active");
+    assert.equal(consent.captureTokenHash, null);
+  });
+
+  it("creates metadata-only proof without content fields", () => {
+    const observation = createHostObservation({
+      id: "host_observation.codex.1",
+      projectId: "p1",
+      host: "codex",
+      eventName: "SessionStart",
+      eventCategory: "session",
+      sessionHash: `sha256:${"a".repeat(64)}`,
+      consentId: "host_consent.p1.codex"
+    });
+    assert.equal(observation.captureMode, "metadata_only");
+    assert.equal("content" in observation, false);
+    assert.equal("transcriptPath" in observation, false);
+  });
+});
+
 describe("createThoughtFragment", () => {
   it("creates thought with themes and evidence", () => {
     const t = createThoughtFragment({
@@ -128,6 +159,14 @@ describe("createSkillCandidate", () => {
     assert.equal(s.skillLevel, SKILL_LEVELS.FUNCTIONAL);
     assert.equal(s.promotionGate, null);
     assert.equal(s.lastReviewDecisionId, null);
+    assert.equal(s.schemaVersion, "experience-os.dev/portable-skill/v2");
+    assert.equal(s.version, "0.1.0");
+    assert.equal(s.instructions, null);
+    assert.deepEqual(s.appliesTo, { projects: ["p1"] });
+    assert.deepEqual(s.activation.intents, ["test"]);
+    assert.deepEqual(s.capabilities.required, []);
+    assert.equal(s.degradation.mode, "report_wallhit");
+    assert.equal(s.executionBinding, null);
   });
 
   it("accepts custom skillLevel", () => {

@@ -11,3 +11,18 @@ work/experiments/*/.eos/vault
 
 # Workspace-local EOS data created by `npm run bootstrap`
 .eos/
+
+# Machine-local host hook installations (EOS writes these per-workspace)
+.claude/
+.codex/
+.cursor/
+.mcp.json
+
+# Runtime receipts
+work/host-hook-receipts/
+
+# Local debug utilities and unrelated side projects
+debug-watcher.mjs
+eos-douyin-marketing/
+rig-arm-analysis/
+.trae-html-share-packages/

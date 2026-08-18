@@ -27,6 +27,41 @@ export const SKILL_LEVELS = Object.freeze({
   ATOMIC: "atomic"
 });
 
+export const PORTABLE_SKILL_SCHEMA_VERSION = "experience-os.dev/portable-skill/v2";
+
+export const HOST_OBSERVATION_HOSTS = Object.freeze([
+  "codex",
+  "claude",
+  "cursor",
+  "trae",
+  "vscode"
+]);
+
+export const HOST_OBSERVATION_CATEGORIES = Object.freeze([
+  "session",
+  "turn",
+  "tool",
+  "lifecycle"
+]);
+
+export const HOST_OBSERVATION_EVENTS = Object.freeze([
+  "SessionStart",
+  "SessionEnd",
+  "SubagentStart",
+  "SubagentStop",
+  "UserPromptSubmit",
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "PermissionRequest",
+  "PermissionDenied",
+  "PreCompact",
+  "PostCompact",
+  "Stop",
+  "StopFailure",
+  "Notification"
+]);
+
 export const SKILL_STATUSES = Object.freeze([
   "candidate",
   "candidate_retained",
@@ -389,6 +424,69 @@ export function createConversationEvent({ id, projectId, actor, content, sourceT
   };
 }
 
+export function createHostObservationConsent({
+  id,
+  projectId,
+  host,
+  approvedBy,
+  status = "active",
+  scope = "metadata_only",
+  captureTokenHash = null,
+  approvedAt = null,
+  revokedAt = null
+}) {
+  const timestamp = nowIso();
+  return {
+    id,
+    kind: "HostObservationConsent",
+    projectId,
+    host,
+    status,
+    scope,
+    captureTokenHash,
+    approvedBy,
+    approvedAt: approvedAt ?? timestamp,
+    revokedAt,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+}
+
+/** Metadata-only proof that a consented host lifecycle event reached EOS. */
+export function createHostObservation({
+  id,
+  projectId,
+  host,
+  eventName,
+  eventCategory,
+  sessionHash,
+  turnHash = null,
+  toolName = null,
+  permissionMode = null,
+  outcome = "unknown",
+  consentId,
+  observedAt = null
+}) {
+  return {
+    id,
+    kind: "HostObservation",
+    metadataVersion: 1,
+    projectId,
+    host,
+    eventName,
+    eventCategory,
+    sessionHash,
+    turnHash,
+    toolName,
+    permissionMode,
+    outcome,
+    consentId,
+    captureMode: "metadata_only",
+    observedAt: observedAt ?? nowIso(),
+    createdAt: nowIso()
+  };
+}
+
 /** A user-marked, local work boundary that groups raw collaboration and evidence. */
 export function createWorkCheckpoint({ id, projectId, title, eventId, evidenceLinkId, notes = "", capturePermitId = null, createdAt = null }) {
   return {
@@ -501,8 +599,40 @@ export function createSkillCandidate({
   promotionGate = null,
   candidateReason = null,
   lastReviewDecisionId = null,
-  reviewedAt = null
+  reviewedAt = null,
+  schemaVersion = PORTABLE_SKILL_SCHEMA_VERSION,
+  version = "0.1.0",
+  instructions = null,
+  evidenceLinkIds = [],
+  appliesTo = null,
+  activation = null,
+  capabilities = null,
+  targetOverrides = {},
+  degradation = null,
+  executionBinding = null,
+  validationPlan = null,
+  compatibilityReceipts = []
 }) {
+  const resolvedAppliesTo = appliesTo ?? { projects: [projectId] };
+  const resolvedActivation = activation ?? {
+    intents: trigger?.intent ? [trigger.intent] : [],
+    signals: Array.isArray(trigger?.signals) ? [...trigger.signals] : [],
+    priority: 0
+  };
+  const resolvedCapabilities = capabilities ?? {
+    required: [],
+    optional: [],
+    denied: []
+  };
+  const resolvedDegradation = degradation ?? {
+    mode: "report_wallhit",
+    message: fallback
+  };
+  const resolvedValidationPlan = validationPlan ?? {
+    checks: ["schema", "human_review", "outcome_evidence"],
+    evidenceRequired: true
+  };
+
   return {
     id,
     kind: "Skill",
@@ -523,6 +653,18 @@ export function createSkillCandidate({
     candidateReason,
     lastReviewDecisionId,
     reviewedAt,
+    schemaVersion,
+    version,
+    instructions,
+    evidenceLinkIds,
+    appliesTo: resolvedAppliesTo,
+    activation: resolvedActivation,
+    capabilities: resolvedCapabilities,
+    targetOverrides,
+    degradation: resolvedDegradation,
+    executionBinding,
+    validationPlan: resolvedValidationPlan,
+    compatibilityReceipts,
     createdAt: nowIso(),
     updatedAt: nowIso()
   };

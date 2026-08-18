@@ -10,6 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { GitVault } from "./gitVault.js";
 import { startProject } from "./projectEngine.js";
+import { installPresetSkills } from "./eosPresetSkills.js";
 import { safeIdSlug } from "./utils.js";
 
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -53,6 +54,12 @@ export async function bootstrapWorkspace({ workspaceDir, name = null, goal = nul
       tags: ["bootstrapped"]
     });
     projectCreated = true;
+    try {
+      const presetResult = await installPresetSkills({ vault, projectId });
+      console.error(`[EOS bootstrap] preset skills: ${presetResult.installed.length} installed, ${presetResult.skipped.length} skipped`);
+    } catch (error) {
+      console.error(`[EOS bootstrap] preset skills install failed (non-fatal): ${error.message}`);
+    }
   }
 
   const manifest = {

@@ -449,6 +449,8 @@ export class GitVault {
 const COLLECTION_DIRS = {
   Project: "projects",
   ConversationEvent: "events",
+  HostObservationConsent: "host-observation-consents",
+  HostObservation: "host-observations",
   ThoughtFragment: "thoughts",
   Artifact: "artifacts",
   Rule: "rules",
@@ -500,6 +502,8 @@ GitVault.prototype.findCollectionDir = function (recordId) {
   if (id.startsWith("reflection.")) return "reflection-memories";
   if (id.startsWith("artifact.")) return "artifacts";
   if (id.startsWith("event.")) return "events";
+  if (id.startsWith("host_consent.")) return "host-observation-consents";
+  if (id.startsWith("host_observation.")) return "host-observations";
   if (id.startsWith("evidence.")) return "evidence-links";
   if (id.startsWith("receipt.")) return "experience-receipts";
   if (id.startsWith("receipt_draft.")) return "experience-receipt-drafts";

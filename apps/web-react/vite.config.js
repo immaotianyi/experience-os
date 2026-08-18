@@ -11,7 +11,9 @@ export default defineConfig({
   },
   build: {
     outDir: "../web",
-    emptyOutDir: false,
+    // apps/web is a deployable artifact, not an append-only build history.
+    // Clearing it prevents stale hashed bundles from producing cached white screens.
+    emptyOutDir: true,
     assetsDir: "assets"
   }
 });

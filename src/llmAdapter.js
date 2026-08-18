@@ -18,7 +18,30 @@
  * llm.totalUsage against a threshold before proceeding.
  */
 
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { nowIso } from "./domain.js";
+
+// GUI-launched processes (e.g. the macOS app sidecar) do not inherit the
+// LaunchAgent environment that holds LLM_PROVIDER / API keys. Fall back to a
+// 0600 KEY=VALUE file so the desktop app keeps a live model without launchctl.
+// Explicit env vars always win; tests can opt out with EOS_LLM_ENV_FILE=0.
+let llmEnvFileLoaded = false;
+function loadLlmEnvFile() {
+  if (llmEnvFileLoaded || process.env.EOS_LLM_ENV_FILE === "0") return;
+  llmEnvFileLoaded = true;
+  try {
+    const path = process.env.EOS_LLM_ENV_FILE || join(homedir(), ".experience-os", "secrets", "llm.env");
+    if (!existsSync(path)) return;
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
+      if (match && process.env[match[1]] === undefined) process.env[match[1]] = match[2];
+    }
+  } catch {
+    // unreadable or malformed file must never crash adapter selection
+  }
+}
 
 /**
  * @typedef {Object} LLMRequest
@@ -333,6 +356,7 @@ export class AnthropicLLMAdapter extends BaseLLMAdapter {
  * @returns {BaseLLMAdapter}
  */
 export function createLLMAdapter(options = {}) {
+  loadLlmEnvFile();
   const provider = (options.provider || process.env.LLM_PROVIDER || "").toLowerCase();
   let fallbackReason = null;
 

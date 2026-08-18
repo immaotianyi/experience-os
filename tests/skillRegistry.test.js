@@ -34,7 +34,9 @@ before(async () => {
     outputSchema: { type: "object" },
     safetyLevel: "L1",
     fallback: "none",
-    humanConfirmationRequired: false
+    humanConfirmationRequired: false,
+    instructions: "Apply the stable registry workflow.",
+    evidenceLinkIds: ["evidence.registry.1"]
   });
   stableSkill.status = "stable";
   await vault.save(stableSkill);
@@ -92,6 +94,8 @@ describe("buildLocalIndex", () => {
     assert.ok(stable);
     assert.equal(stable.status, "stable");
     assert.equal(stable.mcpExportable, true);
+    assert.equal(stable.distributionReady, true);
+    assert.deepEqual(stable.distributionBlockers, []);
     assert.ok(stable.qualityScore >= 0);
     assert.ok(stable.qualityGrade);
   });
@@ -162,7 +166,8 @@ describe("importSkill", () => {
         inputSchema: { type: "object" },
         outputSchema: { type: "object" },
         safetyLevel: "L2",
-        fallback: "error"
+        fallback: "error",
+        prompt: "Apply the imported workflow after human review."
       },
       projectId: "project.registry_test",
       source: "test-import"
@@ -171,6 +176,7 @@ describe("importSkill", () => {
     assert.equal(skill.status, "candidate");
     assert.equal(skill.origin, "test-import");
     assert.equal(skill.candidateReason, "imported");
+    assert.equal(skill.instructions, "Apply the imported workflow after human review.");
     assert.ok(skill.adaptationNotes[0].includes("test-import"));
 
     // Verify it was saved

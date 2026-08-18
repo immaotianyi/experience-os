@@ -1,9 +1,10 @@
 import { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { bootstrapWorkspace } from "../src/eosBootstrap.js";
+import { EOS_RELAY_PATH } from "../src/eosMcpProbe.js";
 import {
   PLATFORMS,
   detectPlatform,
@@ -13,7 +14,8 @@ import {
   getInstallInstructions
 } from "../src/eosPlatformAdapter.js";
 
-const KNOWN_PLATFORMS = ["tray", "work", "vault", "codex", "cloud"];
+const KNOWN_HOSTS = ["codex", "claude", "cursor", "trae", "vscode"];
+const VALID_STATUSES = ["not_installed", "available", "configured", "callable", "observing", "error"];
 
 let tempDirs = [];
 afterEach(async () => {
@@ -21,148 +23,145 @@ afterEach(async () => {
   tempDirs = [];
 });
 
-describe("EOS platform adapter", () => {
-  describe("PLATFORMS constant", () => {
-    it("exports the five known platform definitions in order", () => {
-      const names = PLATFORMS.map((p) => p.name);
-      assert.deepEqual(names, KNOWN_PLATFORMS);
-      for (const p of PLATFORMS) {
-        assert.equal(typeof p.name, "string");
-        assert.ok(p.name.length > 0);
-        assert.equal(typeof p.description, "string");
-        assert.ok(p.description.length > 0);
-      }
-    });
+async function workspace() {
+  const dir = await mkdtemp(path.join(tmpdir(), "eos-integration-"));
+  tempDirs.push(dir);
+  const config = await bootstrapWorkspace({ workspaceDir: dir, name: "Integration test" });
+  return { dir, config };
+}
 
-    it("is frozen so callers cannot mutate the registry", () => {
-      assert.ok(Object.isFrozen(PLATFORMS));
-    });
+describe("EOS verified integration adapters", () => {
+  it("names real AI hosts rather than EOS internal components", () => {
+    assert.deepEqual(PLATFORMS.map((host) => host.name), KNOWN_HOSTS);
+    assert.ok(Object.isFrozen(PLATFORMS));
+    for (const host of PLATFORMS) {
+      assert.ok(host.label);
+      assert.ok(host.description);
+      assert.ok(["supported", "unverified", "mcp_only", "extension"].includes(host.hooks));
+    }
   });
 
-  describe("platform detection", () => {
-    it("detects a bootstrapped workspace via the work platform", async () => {
-      const workspace = await mkdtemp(path.join(tmpdir(), "eos-platform-work-"));
-      tempDirs.push(workspace);
-      await bootstrapWorkspace({ workspaceDir: workspace, name: "Adapter test" });
-
-      const result = await detectPlatform("work", { workspaceDir: workspace });
-      assert.equal(result.detected, true);
-      assert.equal(result.status, "active");
-      assert.ok(result.details.projectId, "projectId should be populated");
-      assert.equal(result.details.workspace, workspace);
-      assert.equal(result.details.vaultDir, path.join(workspace, ".eos", "vault"));
+  it("returns an evidence-shaped result for every host", async () => {
+    const { dir, config } = await workspace();
+    const health = await checkPlatformHealth({
+      workspaceDir: dir,
+      vaultDir: config.vaultDir
     });
 
-    it("detects an initialized vault via the vault platform", async () => {
-      const workspace = await mkdtemp(path.join(tmpdir(), "eos-platform-vault-"));
-      tempDirs.push(workspace);
-      const bootstrapped = await bootstrapWorkspace({ workspaceDir: workspace, name: "Vault test" });
-
-      const result = await detectPlatform("vault", { vaultDir: bootstrapped.vaultDir });
-      assert.equal(result.detected, true);
-      assert.match(result.status, /active|ready/);
-      assert.equal(result.details.vaultDir, bootstrapped.vaultDir);
-      assert.equal(result.details.gitInitialized, true);
-    });
-
-    it("returns a well-formed result for an unbootstrapped path query", async () => {
-      // detectPlatform("work") falls back to cwd and sourceRoot, so running from
-      // inside a bootstrapped repo will likely return detected=true. We verify the
-      // result is always well-formed regardless of which branch is taken.
-      const queried = "/nonexistent/eos/workspace";
-      const result = await detectPlatform("work", { workspaceDir: queried });
-      assert.ok(typeof result.detected === "boolean");
-      assert.ok(["active", "ready", "not_configured"].includes(result.status));
-      assert.ok(result.details && typeof result.details === "object");
-      if (result.status === "not_configured") {
-        assert.ok(Array.isArray(result.details.searched));
-      } else {
-        assert.ok(result.details.workspace, "active/ready result should include workspace path");
-      }
-    });
-
-    it("reports not_configured for a vault directory that does not exist", async () => {
-      const result = await detectPlatform("vault", { vaultDir: "/nonexistent/eos/vault" });
-      assert.equal(result.detected, false);
-      assert.equal(result.status, "not_configured");
-    });
-
-    it("checkPlatformHealth returns a status for every platform and detects work + vault", async () => {
-      const workspace = await mkdtemp(path.join(tmpdir(), "eos-platform-health-"));
-      tempDirs.push(workspace);
-      await bootstrapWorkspace({ workspaceDir: workspace, name: "Health test" });
-
-      const health = await checkPlatformHealth({ workspaceDir: workspace });
-      assert.equal(health.summary.total, KNOWN_PLATFORMS.length);
-
-      for (const name of KNOWN_PLATFORMS) {
-        assert.ok(health.platforms[name], `missing status for ${name}`);
-        assert.ok(
-          ["active", "ready", "not_configured", "error"].includes(health.platforms[name].status),
-          `unexpected status for ${name}`
-        );
-      }
-
-      // work and vault should both be detected against the bootstrapped workspace.
-      assert.equal(health.platforms.work.detected, true);
-      assert.equal(health.platforms.vault.detected, true);
-      assert.ok(health.summary.detected >= 2, "at least vault and work should be detected");
-    });
+    assert.equal(health.summary.total, KNOWN_HOSTS.length);
+    assert.equal(health.relay.ok, true);
+    for (const name of KNOWN_HOSTS) {
+      const result = health.platforms[name];
+      assert.ok(VALID_STATUSES.includes(result.status), `${name}: ${result.status}`);
+      assert.equal(typeof result.compatibilityLevel, "number");
+      assert.equal(typeof result.proof.hostInstalled, "boolean");
+      assert.equal(typeof result.proof.mcpRegistered, "boolean");
+      assert.equal(typeof result.proof.relayConformant, "boolean");
+      assert.equal(typeof result.proof.eventObserved, "boolean");
+      assert.ok(result.connection);
+    }
   });
 
-  describe("getInstallInstructions", () => {
-    for (const name of KNOWN_PLATFORMS) {
-      it(`returns a non-empty instruction string for ${name}`, () => {
+  it("detects a project-level Cursor MCP registration without claiming host confirmation", async () => {
+    const { dir, config } = await workspace();
+    const configDir = path.join(dir, ".cursor");
+    await mkdir(configDir, { recursive: true });
+    await writeFile(path.join(configDir, "mcp.json"), JSON.stringify({
+      mcpServers: {
+        "experience-os": {
+          command: process.execPath,
+          args: [EOS_RELAY_PATH],
+          env: {
+            EOS_VAULT_DIR: config.vaultDir,
+            EOS_CAPTURE_POLICY: "strict_permit"
+          }
+        }
+      }
+    }));
+
+    const result = await detectPlatform("cursor", {
+      workspaceDir: dir,
+      vaultDir: config.vaultDir,
+      relayProbe: { ok: true, serverInfo: { name: "experience-os-capture-relay" }, toolCount: 11 }
+    });
+
+    assert.equal(result.proof.mcpRegistered, true);
+    assert.equal(result.proof.vaultBound, true);
+    assert.equal(result.proof.hostConfirmed, false);
+    assert.ok(["not_installed", "configured"].includes(result.status));
+    assert.notEqual(result.status, "callable");
+  });
+
+  it("does not accept a legacy conversation event as observation evidence", async () => {
+    const { dir, config } = await workspace();
+    const result = await detectPlatform("cursor", {
+      workspaceDir: dir,
+      vaultDir: config.vaultDir,
+      observedSourceTools: ["cursor"],
+      relayProbe: { ok: true, serverInfo: { name: "experience-os-capture-relay" }, toolCount: 11 }
+    });
+
+    assert.equal(result.proof.eventObserved, false);
+    if (result.proof.hostInstalled) {
+      assert.equal(result.status, "available");
+      assert.equal(result.compatibilityLevel, 1);
+    } else {
+      assert.equal(result.status, "not_installed");
+    }
+  });
+
+  it("accepts only a consented HostObservation host as L4 evidence", async () => {
+    const result = await detectPlatform("cursor", {
+      observedHosts: ["cursor"],
+      relayProbe: { ok: true, serverInfo: { name: "experience-os-capture-relay" }, toolCount: 11 }
+    });
+    assert.equal(result.proof.eventObserved, true);
+  });
+
+  describe("connection plans", () => {
+    for (const name of KNOWN_HOSTS) {
+      it(`returns reviewable instructions for ${name}`, () => {
         const instructions = getInstallInstructions(name);
-        assert.equal(typeof instructions, "string");
-        assert.ok(instructions.trim().length > 0, `instructions for ${name} are empty`);
+        assert.ok(instructions.includes("严格许可默认开启"));
       });
     }
 
-    it("throws for an unknown platform name", () => {
-      assert.throws(() => getInstallInstructions("nope"), /Unknown EOS platform/);
-    });
-  });
+    it("generates a VS Code MCP config without modifying the workspace", async () => {
+      const { dir, config } = await workspace();
+      const result = await tryStartPlatform("vscode", {
+        workspaceDir: dir,
+        vaultDir: config.vaultDir
+      });
 
-  describe("getPlatformAdapter", () => {
-    it("returns an adapter with detect/start/instructions for a known platform", () => {
-      const adapter = getPlatformAdapter("vault");
-      assert.equal(adapter.name, "vault");
-      assert.equal(typeof adapter.detect, "function");
-      assert.equal(typeof adapter.start, "function");
-      assert.equal(typeof adapter.instructions, "function");
-    });
-
-    it("throws for an unknown platform name", () => {
-      assert.throws(() => getPlatformAdapter("nope"), /Unknown EOS platform/);
-    });
-  });
-
-  describe("tryStartPlatform", () => {
-    it("returns a started:false envelope for an unknown platform name", async () => {
-      const result = await tryStartPlatform("nope");
       assert.equal(result.started, false);
-      assert.ok(result.message, "should carry an error message");
+      assert.equal(result.action, "human_configuration_required");
+      assert.equal(result.configPath, path.join(dir, ".vscode", "mcp.json"));
+      assert.equal(result.config.servers["experience-os"].type, "stdio");
+      assert.equal(result.config.servers["experience-os"].env.EOS_CAPTURE_POLICY, "strict_permit");
     });
 
-    it("returns a result object for a platform with no runnable process (vault)", async () => {
-      const result = await tryStartPlatform("vault");
-      assert.equal(typeof result.started, "boolean");
-      assert.equal(typeof result.message, "string");
-      assert.ok(result.message.length > 0);
-    });
+    it("never replaces an explicit unbootstrapped workspace with the process cwd", async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "eos-explicit-workspace-"));
+      tempDirs.push(dir);
+      const result = await tryStartPlatform("cursor", {
+        workspaceDir: dir,
+        vaultDir: path.join(dir, ".eos", "vault")
+      });
 
-    it("returns a helpful message when no workspace is bound for the workbench", async () => {
-      // Ensure no ambient EOS_WORKSPACE_DIR influences the result.
-      const saved = process.env.EOS_WORKSPACE_DIR;
-      delete process.env.EOS_WORKSPACE_DIR;
-      try {
-        const result = await tryStartPlatform("work", { workspaceDir: "/nonexistent/eos/workspace" });
-        assert.equal(result.started, false);
-        assert.ok(result.message.length > 0);
-      } finally {
-        if (saved !== undefined) process.env.EOS_WORKSPACE_DIR = saved;
-      }
+      assert.equal(result.configPath, path.join(dir, ".cursor", "mcp.json"));
     });
+  });
+
+  it("returns an adapter for a known host and rejects unknown names", () => {
+    const adapter = getPlatformAdapter("claude");
+    assert.equal(adapter.name, "claude");
+    assert.equal(typeof adapter.detect, "function");
+    assert.throws(() => getPlatformAdapter("tray"), /Unknown EOS integration host/);
+  });
+
+  it("fails closed for unknown connection attempts", async () => {
+    const result = await tryStartPlatform("nope");
+    assert.equal(result.started, false);
+    assert.match(result.message, /Unknown EOS integration host/);
   });
 });

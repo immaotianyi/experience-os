@@ -46,6 +46,8 @@ import path from "node:path";
 const COLLECTION_DIR = Object.freeze({
   Project: "projects",
   ConversationEvent: "events",
+  HostObservationConsent: "host-observation-consents",
+  HostObservation: "host-observations",
   ThoughtFragment: "thoughts",
   Artifact: "artifacts",
   Rule: "rules",

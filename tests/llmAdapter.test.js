@@ -80,9 +80,11 @@ describe("createLLMAdapter factory", () => {
     const originalOpenAI = process.env.OPENAI_API_KEY;
     const originalAnthropic = process.env.ANTHROPIC_API_KEY;
     const originalProvider = process.env.LLM_PROVIDER;
+    const originalEnvFile = process.env.EOS_LLM_ENV_FILE;
     delete process.env.OPENAI_API_KEY;
     delete process.env.ANTHROPIC_API_KEY;
     delete process.env.LLM_PROVIDER;
+    process.env.EOS_LLM_ENV_FILE = "0";
 
     const llm = createLLMAdapter();
     assert.equal(llm.name, "mock");
@@ -92,6 +94,8 @@ describe("createLLMAdapter factory", () => {
     if (originalOpenAI) process.env.OPENAI_API_KEY = originalOpenAI;
     if (originalAnthropic) process.env.ANTHROPIC_API_KEY = originalAnthropic;
     if (originalProvider) process.env.LLM_PROVIDER = originalProvider;
+    if (originalEnvFile !== undefined) process.env.EOS_LLM_ENV_FILE = originalEnvFile;
+    else delete process.env.EOS_LLM_ENV_FILE;
   });
 
   it("returns MockLLMAdapter when provider is mock", () => {

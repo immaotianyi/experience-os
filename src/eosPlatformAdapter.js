@@ -1,626 +1,639 @@
 /**
- * Unified platform adapter for Experience OS.
+ * Verified host integrations for Experience OS.
  *
- * Detects, reports and (where possible) starts the five integration
- * surfaces EOS relies on:
+ * A host is never called "compatible" merely because an application or an
+ * EOS-internal component exists. Evidence advances in this order:
  *
- *   tray  — macOS menu-bar app (EOS.app) + launchd core agent
- *   work  — a local EOS workspace (.eos/project.json) bound to one Vault
- *   vault — the Git-backed Vault (GitVault) that stores every record
- *   codex — the Codex CLI + opt-in EOS capture relay MCP server
- *   cloud — cloud deployment via Docker (Dockerfile) and Render (render.yaml)
+ *   detected -> configured -> callable -> observing
  *
- * The adapter is deliberately read-only and defensive: a detection never
- * throws — it reports `status: "error"` with details instead — so callers
- * can render a single health dashboard without try/catch around every
- * platform. Starting a platform (tryStartPlatform) is best-effort and also
- * never throws; it returns `{ started, message }`.
- *
- * Existing systems are reused rather than reimplemented:
- *   - work  reuses eosWorkbench.resolveWorkspaceWorkbench
- *   - codex reuses eosCodexPreflight.checkCodexIntegration
- *   - vault reuses vaultPath.resolveVaultDir + GitVault's on-disk layout
+ * - detected: the real AI host is installed.
+ * - configured: that host has an EOS MCP registration for the current Vault.
+ * - callable: the host confirms registration and the EOS relay passes a real
+ *   MCP initialize + tools/list handshake.
+ * - observing: EOS has received a consented event attributed to that host.
  */
 
 import { existsSync } from "node:fs";
-import { access } from "node:fs/promises";
-import { spawn, spawnSync, execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveWorkspaceWorkbench } from "./eosWorkbench.js";
+import { EOS_RELAY_PATH, probeEosMcpRelay } from "./eosMcpProbe.js";
 import { resolveVaultDir } from "./vaultPath.js";
-import { checkCodexIntegration } from "./eosCodexPreflight.js";
 
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const EOS_APP_PATH = path.join(sourceRoot, "dist", "EOS.app");
-const LAUNCHD_LABEL = "local.experienceos.core";
-const DOCKERFILE_PATH = path.join(sourceRoot, "Dockerfile");
-const RENDER_YAML_PATH = path.join(sourceRoot, "render.yaml");
-const WEB_SERVER_SCRIPT = path.join(sourceRoot, "src", "webServer.js");
-const VAULT_COLLECTION_DIRS = ["projects", "artifacts", "events", "skills", "work-checkpoints"];
+const home = os.homedir();
 
-function isMacOS() {
-  return process.platform === "darwin";
-}
+const APP_PATHS = Object.freeze({
+  codex: [
+    "/Applications/Codex.app",
+    path.join(home, "Applications", "Codex.app")
+  ],
+  claude: [
+    "/Applications/Claude.app"
+  ],
+  cursor: [
+    "/Applications/Cursor.app"
+  ],
+  trae: [
+    "/Applications/Trae.app",
+    "/Applications/Trae CN.app",
+    "/Applications/TRAE SOLO.app",
+    "/Applications/TRAE SOLO CN.app"
+  ],
+  vscode: [
+    "/Applications/Visual Studio Code.app",
+    "/Applications/Visual Studio Code - Insiders.app"
+  ]
+});
 
-function isWindows() {
-  return process.platform === "win32";
-}
+const COMMANDS = Object.freeze({
+  codex: [
+    "codex",
+    path.join(home, ".local", "bin", "codex")
+  ],
+  claude: ["claude"],
+  cursor: [
+    "cursor-agent",
+    "cursor",
+    "/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
+  ],
+  trae: [
+    "trae",
+    "trae-cn",
+    "/Applications/Trae CN.app/Contents/Resources/app/bin/trae-cn",
+    "/Applications/TRAE SOLO CN.app/Contents/Resources/app/bin/trae-solo-cn"
+  ],
+  vscode: [
+    "code",
+    "code-insiders",
+    "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+  ]
+});
 
-function codexBinary() {
-  return isWindows() ? "codex.cmd" : "codex";
-}
+const HOST_DEFINITIONS = Object.freeze([
+  {
+    name: "codex",
+    label: "Codex",
+    description: "OpenAI Codex desktop、CLI 与 IDE 扩展共享 MCP 配置；支持经许可的运行状态 Hooks。",
+    hooks: "supported",
+    observedAliases: ["codex"]
+  },
+  {
+    name: "claude",
+    label: "Claude Code",
+    description: "Claude Code 支持本地 MCP，并提供会话、提示、工具调用和结束事件 Hooks。",
+    hooks: "supported",
+    observedAliases: ["claude", "claude-code"]
+  },
+  {
+    name: "cursor",
+    label: "Cursor",
+    description: "Cursor IDE 与 CLI 支持 MCP 与项目级 .cursor/hooks.json 运行状态 Hooks（会话、提示、工具前后与结束事件）。",
+    hooks: "supported",
+    observedAliases: ["cursor", "cursor-agent"]
+  },
+  {
+    name: "trae",
+    label: "TRAE",
+    description: "TRAE IDE / TRAE Work 官方确认支持 MCP；配置入口与运行状态 Hook 仍需逐版本验收。",
+    hooks: "mcp_only",
+    observedAliases: ["trae", "trae-work", "trae-ide"]
+  },
+  {
+    name: "vscode",
+    label: "VS Code",
+    description: "VS Code Agent 完整支持 MCP，并允许扩展程序注册 MCP Server Definition Provider。",
+    hooks: "extension",
+    observedAliases: ["vscode", "github-copilot"]
+  }
+]);
 
-function safeGetuid() {
-  return typeof process.getuid === "function" ? String(process.getuid()) : null;
-}
-
-/**
- * Run a command asynchronously, never throwing. Returns a result envelope
- * so detection logic stays defensive. Mirrors the helper in
- * eosCodexPreflight.js but is kept local to avoid coupling.
- */
-function run(command, args, timeoutMs = 10_000) {
+function run(command, args, timeoutMs = 8_000) {
   return new Promise((resolve) => {
-    const opts = { encoding: "utf8", timeout: timeoutMs };
-    const handle = (error, stdout, stderr) =>
-      resolve({ ok: !error, stdout: String(stdout || ""), stderr: String(stderr || ""), error: error?.message || null });
-    if (isWindows() && command.endsWith(".cmd")) {
-      execFile(command, args, { ...opts, shell: true }, handle);
-    } else {
-      execFile(command, args, opts, handle);
-    }
+    execFile(command, args, { encoding: "utf8", timeout: timeoutMs }, (error, stdout, stderr) => {
+      resolve({
+        ok: !error,
+        stdout: String(stdout || ""),
+        stderr: String(stderr || ""),
+        error: error?.message || null
+      });
+    });
   });
 }
 
-/** Synchronous command runner for quick filesystem/launchctl probes. */
-function runSync(command, args, timeoutMs = 5_000) {
-  try {
-    const result = spawnSync(command, args, { encoding: "utf8", timeout: timeoutMs, stdio: ["pipe", "pipe", "pipe"] });
-    return { ok: result.status === 0, stdout: String(result.stdout || ""), stderr: String(result.stderr || ""), status: result.status };
-  } catch (error) {
-    return { ok: false, stdout: "", stderr: String(error.message), status: null };
+async function detectHost(name) {
+  for (const command of COMMANDS[name] || []) {
+    const result = await run(command, ["--version"], 4_000);
+    if (result.ok) {
+      return {
+        installed: true,
+        command,
+        version: result.stdout.trim().split("\n")[0] || null,
+        appPath: (APP_PATHS[name] || []).find(existsSync) || null
+      };
+    }
   }
+  const appPath = (APP_PATHS[name] || []).find(existsSync) || null;
+  return {
+    installed: Boolean(appPath),
+    command: null,
+    version: null,
+    appPath
+  };
 }
 
-async function pathExists(filePath) {
-  try { await access(filePath); return true; } catch { return false; }
-}
+async function resolveWorkspace(options = {}) {
+  if (options.workspaceDir) {
+    const explicitWorkspace = path.resolve(options.workspaceDir);
+    try {
+      return await resolveWorkspaceWorkbench({ workspaceDir: explicitWorkspace });
+    } catch {
+      // An explicit caller boundary must never silently fall through to cwd.
+      return {
+        workspace: explicitWorkspace,
+        vaultDir: options.vaultDir ? path.resolve(options.vaultDir) : null
+      };
+    }
+  }
 
-/**
- * Candidate workspace directories to probe, in priority order. Explicit
- * arguments and env always win; cwd and the EOS source root are sensible
- * fallbacks for developer machines.
- */
-function resolveWorkspaceCandidates(workspaceDir) {
-  const candidates = [];
-  if (workspaceDir) candidates.push(path.resolve(workspaceDir));
-  if (process.env.EOS_WORKSPACE_DIR) candidates.push(path.resolve(process.env.EOS_WORKSPACE_DIR));
-  candidates.push(process.cwd());
-  candidates.push(sourceRoot);
-  return [...new Set(candidates)];
-}
+  const candidates = [
+    process.env.EOS_WORKSPACE_DIR,
+    process.cwd(),
+    sourceRoot
+  ].filter(Boolean);
 
-/** First candidate whose .eos/project.json exists (synchronous probe). */
-function firstResolvableWorkspace() {
-  for (const candidate of resolveWorkspaceCandidates()) {
-    if (existsSync(path.join(candidate, ".eos", "project.json"))) return candidate;
+  for (const candidate of [...new Set(candidates.map((item) => path.resolve(item)))]) {
+    try {
+      return await resolveWorkspaceWorkbench({ workspaceDir: candidate });
+    } catch {
+      // Keep looking for a real EOS workspace.
+    }
   }
   return null;
 }
 
-/** Read the EOS_VAULT_DIR bound to a registered relay config (mirrors eosCodexPreflight). */
-function readRegisteredVault(server) {
-  const value = server?.transport?.env?.EOS_VAULT_DIR;
+async function readJson(file) {
+  try {
+    return { file, value: JSON.parse(await readFile(file, "utf8")), error: null };
+  } catch (error) {
+    return {
+      file,
+      value: null,
+      error: error.code === "ENOENT" ? null : error.message
+    };
+  }
+}
+
+function relayEntryFromConfig(config, container) {
+  const entries = config?.[container];
+  if (!entries || typeof entries !== "object") return null;
+  return entries["experience-os"] ?? entries.experience_os ?? null;
+}
+
+function entryPointsToEosRelay(entry) {
+  if (!entry || typeof entry !== "object") return false;
+  const args = Array.isArray(entry.args) ? entry.args.map(String) : [];
+  return args.some((arg) => path.basename(arg) === "eosRelayMcp.js");
+}
+
+function configuredVault(entry) {
+  const value = entry?.env?.EOS_VAULT_DIR;
   return typeof value === "string" && value.trim() ? path.resolve(value) : null;
 }
 
-/**
- * Determine whether a directory looks like an initialized GitVault. A vault
- * is considered initialized if it has a `.git` directory (GitVault ran) or
- * at least one known collection subdirectory.
- */
-async function probeVaultInit(dir) {
-  const gitInitialized = await pathExists(path.join(dir, ".git"));
-  if (gitInitialized) return { initialized: true, gitInitialized: true, evidence: ".git" };
-  for (const sub of VAULT_COLLECTION_DIRS) {
-    if (await pathExists(path.join(dir, sub))) {
-      return { initialized: true, gitInitialized: false, evidence: sub };
+async function findFileRegistration(candidates, container) {
+  for (const candidate of candidates.filter(Boolean)) {
+    const parsed = await readJson(candidate);
+    if (parsed.error) {
+      return {
+        registered: false,
+        configPath: candidate,
+        entry: null,
+        error: parsed.error
+      };
+    }
+    const entry = relayEntryFromConfig(parsed.value, container);
+    if (entry) {
+      return {
+        registered: entryPointsToEosRelay(entry),
+        configPath: candidate,
+        entry,
+        error: null
+      };
     }
   }
-  return { initialized: false, gitInitialized: false, evidence: null };
+  return { registered: false, configPath: null, entry: null, error: null };
 }
 
-/* ------------------------------------------------------------------ *
- * Platform adapters
- * ------------------------------------------------------------------ */
+function samePath(left, right) {
+  if (!left || !right) return null;
+  return path.resolve(left) === path.resolve(right);
+}
 
-const trayAdapter = {
-  name: "tray",
-  description: "macOS menu-bar tray app (EOS.app) and its launchd core agent",
-  async detect() {
-    if (!isMacOS()) {
-      return { detected: false, status: "not_configured", details: { reason: "macOS only", platform: process.platform } };
+function observedFor(definition, options) {
+  const observed = new Set((options.observedHosts || []).map((item) => String(item).toLowerCase()));
+  return definition.observedAliases.some((alias) => observed.has(alias));
+}
+
+function statusForProof(proof) {
+  if (!proof.hostInstalled) return "not_installed";
+  const callable = proof.mcpRegistered
+    && proof.vaultBound === true
+    && proof.hostConfirmed
+    && proof.relayConformant;
+  if (callable && proof.eventObserved) return "observing";
+  if (callable) return "callable";
+  if (proof.mcpRegistered) return "configured";
+  return "available";
+}
+
+const MCP_RELAY_OBSERVED_HOSTS = new Set(["trae", "cursor", "vscode"]);
+
+function relayConfig(vaultDir, host = null) {
+  const relayHost = String(host || "").trim().toLowerCase();
+  return {
+    command: process.execPath,
+    args: [EOS_RELAY_PATH],
+    env: {
+      EOS_VAULT_DIR: vaultDir,
+      EOS_CAPTURE_POLICY: "strict_permit",
+      // Hook-less hosts get relay self-observation instead of hooks.
+      ...(MCP_RELAY_OBSERVED_HOSTS.has(relayHost) ? { EOS_RELAY_HOST: relayHost } : {})
     }
-    const appExists = existsSync(EOS_APP_PATH);
-    const plistPath = path.join(os.homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
-    const plistInstalled = existsSync(plistPath);
-    let launchdLoaded = false;
-    const uid = safeGetuid();
-    if (uid !== null) {
-      launchdLoaded = runSync("launchctl", ["print", `gui/${uid}/${LAUNCHD_LABEL}`]).ok;
-    }
-    const detected = appExists || launchdLoaded;
-    const status = launchdLoaded ? "active" : appExists ? "ready" : "not_configured";
+  };
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+function codexCommand(vaultDir) {
+  return [
+    "codex mcp add experience-os",
+    `--env EOS_VAULT_DIR=${shellQuote(vaultDir)}`,
+    "--env EOS_CAPTURE_POLICY=strict_permit",
+    "--",
+    shellQuote(process.execPath),
+    shellQuote(EOS_RELAY_PATH)
+  ].join(" ");
+}
+
+function claudeCommand(vaultDir) {
+  return [
+    "claude mcp add --scope project experience-os",
+    `--env EOS_VAULT_DIR=${shellQuote(vaultDir)}`,
+    "--env EOS_CAPTURE_POLICY=strict_permit",
+    "--",
+    shellQuote(process.execPath),
+    shellQuote(EOS_RELAY_PATH)
+  ].join(" ");
+}
+
+export function buildPlatformConnectionPlan(name, workspace, vaultDir) {
+  const config = relayConfig(vaultDir, name);
+  if (name === "codex") {
     return {
-      detected,
-      status,
-      details: {
-        appPath: EOS_APP_PATH,
-        appExists,
-        launchdLabel: LAUNCHD_LABEL,
-        plistPath,
-        plistInstalled,
-        launchdLoaded
-      }
+      mode: "command",
+      command: codexCommand(vaultDir),
+      configPath: path.join(home, ".codex", "config.toml")
     };
-  },
-  async start() {
-    if (!isMacOS()) return { started: false, message: "Tray app is macOS only." };
-    if (!existsSync(EOS_APP_PATH)) {
-      return { started: false, message: `EOS.app not found at ${EOS_APP_PATH}. Build it first: npm run macos:bundle` };
-    }
-    const result = runSync("open", [EOS_APP_PATH]);
-    return { started: result.ok, message: result.ok ? "EOS.app launched." : `Failed to open EOS.app: ${result.stderr}` };
-  },
-  instructions() {
-    return [
-      "macOS tray app (EOS.app):",
-      "  1. Install Swift / Xcode command-line tools.",
-      "  2. Build the bundle:  npm run macos:bundle",
-      "  3. Open it once:      open dist/EOS.app",
-      "  4. (Optional) install the launchd core agent so the server runs at login:",
-      "     npm run macos:install-core",
-      "  5. Verify with:       npm run macos:core-status"
-    ].join("\n");
   }
-};
-
-const workAdapter = {
-  name: "work",
-  description: "Local EOS workspace (.eos/project.json) bound to one isolated Vault",
-  async detect(options = {}) {
-    const candidates = resolveWorkspaceCandidates(options.workspaceDir);
-    for (const candidate of candidates) {
-      try {
-        const config = await resolveWorkspaceWorkbench({ workspaceDir: candidate });
-        return {
-          detected: true,
-          status: "active",
-          details: {
-            workspace: config.workspace,
-            projectId: config.projectId,
-            vaultDir: config.vaultDir,
-            port: config.port
-          }
-        };
-      } catch {
-        // not a valid workspace — try the next candidate
-      }
-    }
-    return { detected: false, status: "not_configured", details: { searched: candidates } };
-  },
-  async start(options = {}) {
-    const dir = options.workspaceDir || process.env.EOS_WORKSPACE_DIR;
-    if (!dir) {
-      return { started: false, message: "No workspace specified. Pass workspaceDir or set EOS_WORKSPACE_DIR." };
-    }
-    try {
-      const config = await resolveWorkspaceWorkbench({ workspaceDir: dir, port: options.port });
-      const child = spawn(process.execPath, [WEB_SERVER_SCRIPT], {
-        cwd: sourceRoot,
-        env: { ...process.env, EOS_VAULT_DIR: config.vaultDir, PORT: String(config.port) },
-        stdio: "ignore",
-        detached: true
-      });
-      child.unref();
-      return { started: true, pid: child.pid, message: `Workbench starting at http://localhost:${config.port}` };
-    } catch (error) {
-      return { started: false, message: error.message };
-    }
-  },
-  instructions() {
-    return [
-      "Local workspace (workbench):",
-      "  1. Pick a project directory to bind EOS to.",
-      "  2. Bootstrap it:  npm run bootstrap -- /path/to/project \"Project Name\"",
-      "  3. Start the workbench UI bound to that workspace:",
-      "     npm run workbench -- /path/to/project 4180",
-      "  4. Open http://localhost:4180 in your browser.",
-      "EOS adds a visible .eos/ directory; your project files are never moved or scanned."
-    ].join("\n");
-  }
-};
-
-const vaultAdapter = {
-  name: "vault",
-  description: "Git-backed Vault (GitVault) storing all EOS records with version control",
-  async detect(options = {}) {
-    // A workspace-bound vault is the most relevant; fall back to the real vault.
-    const dir = options.vaultDir
-      || (options.workspaceDir ? path.join(options.workspaceDir, ".eos", "vault") : null)
-      || resolveVaultDir("real");
-    const exists = await pathExists(dir);
-    if (!exists) {
-      return { detected: false, status: "not_configured", details: { vaultDir: dir, reason: "vault directory does not exist" } };
-    }
-    const probe = await probeVaultInit(dir);
-    const detected = probe.initialized;
-    const status = detected ? "active" : "ready";
+  if (name === "claude") {
     return {
-      detected,
-      status,
-      details: {
-        vaultDir: dir,
-        gitInitialized: probe.gitInitialized,
-        evidence: probe.evidence,
-        archiveDir: path.join(sourceRoot, "work", "vault-archive")
-      }
+      mode: "command",
+      command: claudeCommand(vaultDir),
+      configPath: path.join(workspace, ".mcp.json")
     };
-  },
-  async start() {
-    return { started: false, message: "The Vault is initialized on demand by GitVault; there is no separate process to start." };
-  },
-  instructions() {
-    return [
-      "Git-backed Vault (GitVault):",
-      "  The Vault is created automatically when you bootstrap a workspace or",
-      "  start the web server. To use a custom location, set EOS_VAULT_DIR.",
-      "  Default real vault:  work/vaults",
-      "  Default demo vault:  work/fixtures",
-      "  Git is required for version control; without it EOS runs in no-VC mode."
-    ].join("\n");
   }
-};
-
-const codexAdapter = {
-  name: "codex",
-  description: "Codex CLI + EOS capture relay MCP server (opt-in, workspace-scoped)",
-  async detect(options = {}) {
-    const codex = codexBinary();
-    const version = await run(codex, ["--version"]);
-    if (!version.ok) {
-      return { detected: false, status: "not_configured", details: { reason: "codex CLI not found", error: version.error } };
-    }
-    // Codex is installed — inspect the opt-in relay registration.
-    const registered = await run(codex, ["mcp", "get", "experience-os", "--json"]);
-    let registeredConfig = null;
-    if (registered.ok) {
-      try { registeredConfig = JSON.parse(registered.stdout); } catch { registeredConfig = null; }
-    }
-    const boundVaultDir = readRegisteredVault(registeredConfig);
-    const isRegistered = Boolean(registeredConfig);
-
-    // Reuse the full preflight when a workspace is resolvable, so the
-    // active-for-workspace flag is accurate.
-    let activeForWorkspace = null;
-    let workspaceInfo = null;
-    const wsDir = options.workspaceDir || process.env.EOS_WORKSPACE_DIR || firstResolvableWorkspace();
-    if (wsDir) {
-      try {
-        const full = await checkCodexIntegration({ workspaceDir: wsDir });
-        activeForWorkspace = full.codex.activeForWorkspace;
-        workspaceInfo = { workspace: full.workspace, projectId: full.projectId, vaultDir: full.vaultDir };
-      } catch {
-        // workspace not resolvable — report a lightweight status only
-      }
-    }
-    const status = isRegistered && activeForWorkspace === true ? "active" : "ready";
+  if (name === "cursor") {
     return {
-      detected: true,
-      status,
-      details: {
-        version: version.stdout.trim(),
-        eosRelayRegistered: isRegistered,
-        boundVaultDir,
-        activeForWorkspace,
-        workspace: workspaceInfo
-      }
+      mode: "json",
+      configPath: path.join(workspace, ".cursor", "mcp.json"),
+      config: { mcpServers: { "experience-os": config } }
     };
-  },
-  async start(options = {}) {
-    const wsDir = options.workspaceDir || process.env.EOS_WORKSPACE_DIR || firstResolvableWorkspace();
-    if (!wsDir) {
-      return { started: false, message: "No workspace to bind the relay to. Bootstrap one first: npm run bootstrap -- <dir>" };
-    }
-    try {
-      const full = await checkCodexIntegration({ workspaceDir: wsDir });
-      return { started: false, message: "Codex MCP relay is opt-in. Run this command to register it:", command: full.installCommand };
-    } catch (error) {
-      return { started: false, message: error.message };
-    }
-  },
-  instructions() {
-    return [
-      "Codex CLI + EOS MCP relay:",
-      "  1. Install the Codex CLI and ensure `codex` is on your PATH.",
-      "  2. Bootstrap a workspace:  npm run bootstrap -- /path/to/project",
-      "  3. Register the relay (opt-in, workspace-scoped):",
-      "     npm run codex:preflight -- /path/to/project   # prints the exact command",
-      "  The relay never creates approvals or promotes assets; it only captures",
-      "  explicitly consented fragments and reads verified experience."
-    ].join("\n");
   }
-};
-
-const cloudAdapter = {
-  name: "cloud",
-  description: "Cloud deployment via Docker (Dockerfile) and Render (render.yaml)",
-  async detect() {
-    const dockerfileExists = existsSync(DOCKERFILE_PATH);
-    const renderYamlExists = existsSync(RENDER_YAML_PATH);
-    const dockerVersion = await run("docker", ["--version"]);
-    const dockerDaemon = dockerVersion.ok ? await run("docker", ["info"], 8_000) : null;
-    const renderVersion = await run("render", ["--version"], 6_000);
-    const detected = dockerfileExists || renderYamlExists || dockerVersion.ok || renderVersion.ok;
-    let status = "not_configured";
-    if (dockerDaemon?.ok) status = "active";
-    else if (dockerfileExists || renderYamlExists) status = "ready";
+  if (name === "trae") {
     return {
-      detected,
-      status,
-      details: {
-        dockerfile: { path: DOCKERFILE_PATH, exists: dockerfileExists },
-        renderYaml: { path: RENDER_YAML_PATH, exists: renderYamlExists },
-        docker: {
-          installed: dockerVersion.ok,
-          version: dockerVersion.ok ? dockerVersion.stdout.trim() : null,
-          daemonRunning: dockerDaemon?.ok ?? false
-        },
-        render: {
-          installed: renderVersion.ok,
-          version: renderVersion.ok ? renderVersion.stdout.trim() : null
+      mode: "manual",
+      configPath: "TRAE 设置中的 MCP 管理界面（公开稳定文件路径待验证）",
+      config: { mcpServers: { "experience-os": config } },
+      manualSteps: [
+        "打开 TRAE 的 MCP 管理界面。",
+        "新增 stdio MCP Server，并填入下方配置。",
+        "在 TRAE 内确认 experience-os 工具可见，再回到 EOS 验收。"
+      ]
+    };
+  }
+  return {
+    mode: "json",
+    configPath: path.join(workspace, ".vscode", "mcp.json"),
+    config: {
+      servers: {
+        "experience-os": {
+          type: "stdio",
+          ...config
         }
       }
-    };
-  },
-  async start() {
+    }
+  };
+}
+
+async function detectCodexRegistration(currentVault, command = "codex") {
+  const result = await run(command, ["mcp", "get", "experience-os", "--json"]);
+  if (!result.ok) {
     return {
-      started: false,
-      message: "Cloud deployment is managed via Docker / Render. Use: docker build -t experience-os .  or  render deploy"
+      registered: false,
+      hostConfirmed: false,
+      boundVaultDir: null,
+      vaultBound: null,
+      configPath: path.join(home, ".codex", "config.toml"),
+      error: null
     };
-  },
-  instructions() {
-    return [
-      "Cloud deployment (Docker / Render):",
-      "  Docker:",
-      "    1. Install Docker.",
-      "    2. Build the image:  docker build -t experience-os .",
-      "    3. Run it:           docker run -p 8080:8080 -v eos-data:/var/data experience-os",
-      "  Render:",
-      "    1. Install the Render CLI.",
-      "    2. Deploy using render.yaml:  render deploy",
-      "  The Dockerfile builds the React workbench then ships the Node runtime;",
-      "  render.yaml wires the private-beta environment variables and a 1GB disk."
-    ].join("\n");
   }
-};
+  try {
+    const parsed = JSON.parse(result.stdout);
+    const boundVaultDir = configuredVault(parsed.transport);
+    return {
+      registered: entryPointsToEosRelay(parsed.transport),
+      hostConfirmed: true,
+      boundVaultDir,
+      vaultBound: boundVaultDir && currentVault ? samePath(boundVaultDir, currentVault) : null,
+      configPath: path.join(home, ".codex", "config.toml"),
+      error: null
+    };
+  } catch (error) {
+    return {
+      registered: false,
+      hostConfirmed: false,
+      boundVaultDir: null,
+      vaultBound: null,
+      configPath: path.join(home, ".codex", "config.toml"),
+      error: `Codex returned invalid MCP configuration: ${error.message}`
+    };
+  }
+}
 
-/* ------------------------------------------------------------------ *
- * Registry + public API
- * ------------------------------------------------------------------ */
+async function detectClaudeRegistration(workspace, currentVault) {
+  const result = await run("claude", ["mcp", "get", "experience-os"]);
+  const file = await findFileRegistration([
+    path.join(workspace, ".mcp.json"),
+    path.join(home, ".claude", "mcp.json")
+  ], "mcpServers");
+  const boundVaultDir = configuredVault(file.entry);
+  return {
+    registered: result.ok || file.registered,
+    hostConfirmed: result.ok,
+    boundVaultDir,
+    vaultBound: boundVaultDir && currentVault ? samePath(boundVaultDir, currentVault) : null,
+    configPath: file.configPath || path.join(workspace, ".mcp.json"),
+    error: file.error
+  };
+}
 
-const REGISTRY = new Map([
-  ["tray", trayAdapter],
-  ["work", workAdapter],
-  ["vault", vaultAdapter],
-  ["codex", codexAdapter],
-  ["cloud", cloudAdapter]
-]);
+async function detectFileRegistration(name, workspace, currentVault) {
+  const definitions = {
+    cursor: {
+      container: "mcpServers",
+      candidates: [
+        path.join(workspace, ".cursor", "mcp.json"),
+        path.join(home, ".cursor", "mcp.json")
+      ]
+    },
+    trae: {
+      container: "mcpServers",
+      candidates: [
+        path.join(workspace, ".trae", "mcp.json"),
+        path.join(home, ".trae", "mcp.json"),
+        path.join(home, "Library", "Application Support", "Trae", "User", "settings", "mcp.json")
+      ]
+    },
+    vscode: {
+      container: "servers",
+      candidates: [
+        path.join(workspace, ".vscode", "mcp.json"),
+        path.join(home, "Library", "Application Support", "Code", "User", "mcp.json")
+      ]
+    }
+  };
+  const definition = definitions[name];
+  const file = await findFileRegistration(definition.candidates, definition.container);
+  const boundVaultDir = configuredVault(file.entry);
+  return {
+    registered: file.registered,
+    hostConfirmed: false,
+    boundVaultDir,
+    vaultBound: boundVaultDir && currentVault ? samePath(boundVaultDir, currentVault) : null,
+    configPath: file.configPath || definition.candidates[0],
+    error: file.error
+  };
+}
 
-/**
- * Platform definitions (metadata only). Adapters are obtained via
- * getPlatformAdapter(name).
- */
-export const PLATFORMS = Object.freeze(
-  [...REGISTRY.values()].map((adapter) =>
-    Object.freeze({ name: adapter.name, description: adapter.description })
-  )
-);
+function instructionsFor(name) {
+  const common = [
+    "连接后请在宿主中确认 experience-os 工具可见。",
+    "调用 eos_project_readiness 做只读验收。",
+    "严格许可默认开启；没有人类许可时，EOS 不保存协作正文。"
+  ];
+  const first = {
+    codex: "使用 Codex MCP 配置注册 EOS；桌面、CLI 与 IDE 扩展共享该配置。",
+    claude: "使用 claude mcp add 注册 EOS；需要自动事件时，再安装项目级 Claude Hooks。",
+    cursor: "将 EOS stdio server 合并进 .cursor/mcp.json；需要自动事件时，再安装项目级 .cursor/hooks.json Hooks（不要覆盖已有条目）。",
+    trae: "在 TRAE 的 MCP 管理界面注册 EOS stdio server（env 含 EOS_RELAY_HOST=trae）；注册后 EOS 中继将以仅元数据事件回报会话与工具活动，无需 Hook。",
+    vscode: "将 EOS server 合并进 .vscode/mcp.json，或由后续 EOS VS Code 扩展注册。"
+  }[name];
+  return [first, ...common].join("\n");
+}
 
-/**
- * Detect a single platform. Never throws — detection errors are reported as
- * `status: "error"`.
- *
- * @param {string} name platform name (tray | work | vault | codex | cloud)
- * @param {object} [options] platform-specific hints (workspaceDir, vaultDir, port)
- * @returns {Promise<{detected: boolean, status: string, details: object}>}
- */
+function makeAdapter(definition) {
+  return {
+    ...definition,
+    async detect(options = {}) {
+      const host = await detectHost(definition.name);
+      const workspaceConfig = await resolveWorkspace(options);
+      const workspace = workspaceConfig?.workspace || options.workspaceDir || process.cwd();
+      const currentVault = options.vaultDir || workspaceConfig?.vaultDir || resolveVaultDir("real");
+      const relay = options.relayProbe || await probeEosMcpRelay({ vaultDir: currentVault });
+
+      let registration;
+      if (definition.name === "codex") {
+        registration = host.installed
+          ? await detectCodexRegistration(currentVault, host.command)
+          : { registered: false, hostConfirmed: false, boundVaultDir: null, vaultBound: null, configPath: null, error: null };
+      } else if (definition.name === "claude") {
+        registration = host.installed
+          ? await detectClaudeRegistration(workspace, currentVault)
+          : { registered: false, hostConfirmed: false, boundVaultDir: null, vaultBound: null, configPath: null, error: null };
+      } else {
+        registration = await detectFileRegistration(definition.name, workspace, currentVault);
+      }
+
+      const proof = {
+        hostInstalled: host.installed,
+        mcpRegistered: registration.registered,
+        relayConformant: relay.ok,
+        hostConfirmed: registration.hostConfirmed,
+        vaultBound: registration.vaultBound,
+        eventObserved: observedFor(definition, options)
+      };
+      const status = registration.error ? "error" : statusForProof(proof);
+
+      return {
+        detected: host.installed,
+        status,
+        compatibilityLevel: {
+          not_installed: 0,
+          available: 1,
+          configured: 2,
+          callable: 3,
+          observing: 4,
+          error: 0
+        }[status],
+        proof,
+        details: {
+          label: definition.label,
+          version: host.version,
+          command: host.command,
+          appPath: host.appPath,
+          workspace,
+          currentVault,
+          configuredVault: registration.boundVaultDir,
+          configPath: registration.configPath,
+          hooks: definition.hooks,
+          relay: {
+            ok: relay.ok,
+            serverInfo: relay.serverInfo,
+            protocolVersion: relay.protocolVersion,
+            toolCount: relay.toolCount,
+            error: relay.error
+          },
+          error: registration.error
+        },
+        connection: buildPlatformConnectionPlan(definition.name, workspace, currentVault)
+      };
+    },
+    async start(options = {}) {
+      const workspaceConfig = await resolveWorkspace(options);
+      const workspace = workspaceConfig?.workspace || options.workspaceDir || process.cwd();
+      const vaultDir = options.vaultDir || workspaceConfig?.vaultDir || resolveVaultDir("real");
+      const plan = buildPlatformConnectionPlan(definition.name, workspace, vaultDir);
+      return {
+        started: false,
+        action: "human_configuration_required",
+        message: "EOS 不会静默修改其他 AI 工具的配置。请审查并应用下面的连接方案，然后返回本页验收。",
+        ...plan
+      };
+    },
+    instructions() {
+      return instructionsFor(definition.name);
+    }
+  };
+}
+
+const REGISTRY = new Map(HOST_DEFINITIONS.map((definition) => [
+  definition.name,
+  makeAdapter(definition)
+]));
+
+export const PLATFORMS = Object.freeze(HOST_DEFINITIONS.map((definition) => Object.freeze({
+  name: definition.name,
+  label: definition.label,
+  description: definition.description,
+  hooks: definition.hooks
+})));
+
 export async function detectPlatform(name, options = {}) {
   try {
-    const adapter = getPlatformAdapter(name);
-    return await adapter.detect(options);
+    return await getPlatformAdapter(name).detect(options);
   } catch (error) {
-    return { detected: false, status: "error", details: { error: error.message } };
+    return {
+      detected: false,
+      status: "error",
+      compatibilityLevel: 0,
+      proof: {
+        hostInstalled: false,
+        mcpRegistered: false,
+        relayConformant: false,
+        hostConfirmed: false,
+        vaultBound: null,
+        eventObserved: false
+      },
+      details: { error: error.message }
+    };
   }
 }
 
-/**
- * Overall health of every platform, plus a roll-up summary.
- *
- * @param {object} [options] passed through to each platform's detect()
- * @returns {Promise<{platforms: object, summary: object}>}
- */
 export async function checkPlatformHealth(options = {}) {
+  const relayProbe = await probeEosMcpRelay({ vaultDir: options.vaultDir });
   const platforms = {};
   for (const { name } of PLATFORMS) {
-    platforms[name] = await detectPlatform(name, options);
+    platforms[name] = await detectPlatform(name, { ...options, relayProbe });
   }
-  const statuses = Object.values(platforms);
-  const summary = {
-    total: PLATFORMS.length,
-    detected: statuses.filter((r) => r.detected).length,
-    active: statuses.filter((r) => r.status === "active").length,
-    ready: statuses.filter((r) => r.status === "ready").length,
-    notConfigured: statuses.filter((r) => r.status === "not_configured").length,
-    errors: statuses.filter((r) => r.status === "error").length
+  const results = Object.values(platforms);
+  return {
+    platforms,
+    relay: relayProbe,
+    summary: {
+      total: results.length,
+      installed: results.filter((result) => result.proof?.hostInstalled).length,
+      configured: results.filter((result) => result.proof?.mcpRegistered).length,
+      callable: results.filter((result) => result.compatibilityLevel >= 3).length,
+      observing: results.filter((result) => result.compatibilityLevel >= 4).length,
+      errors: results.filter((result) => result.status === "error").length
+    }
   };
-  return { platforms, summary };
 }
 
-/**
- * Return the adapter object for a platform.
- *
- * @param {string} name platform name
- * @returns {{name, description, detect, start, instructions}}
- * @throws {Error} if the platform name is unknown
- */
 export function getPlatformAdapter(name) {
   const adapter = REGISTRY.get(name);
   if (!adapter) {
-    throw new Error(`Unknown EOS platform: ${name}. Known platforms: ${[...REGISTRY.keys()].join(", ")}`);
+    throw new Error(`Unknown EOS integration host: ${name}. Known hosts: ${[...REGISTRY.keys()].join(", ")}`);
   }
   return adapter;
 }
 
-/**
- * Best-effort attempt to start / connect to a platform (e.g. open the tray
- * app, launch the workbench). Never throws.
- *
- * @param {string} name platform name
- * @param {object} [options] platform-specific hints
- * @returns {Promise<{started: boolean, message: string, [pid]: number, [command]: string}>}
- */
 export async function tryStartPlatform(name, options = {}) {
   try {
-    const adapter = getPlatformAdapter(name);
-    return await adapter.start(options);
+    return await getPlatformAdapter(name).start(options);
   } catch (error) {
     return { started: false, message: error.message };
   }
 }
 
-/**
- * Human-readable setup instructions for a platform that is not yet
- * configured.
- *
- * @param {string} name platform name
- * @returns {string} non-empty setup instructions
- * @throws {Error} if the platform name is unknown
- */
 export function getInstallInstructions(name) {
   return getPlatformAdapter(name).instructions();
 }
 
-/**
- * Diagnose a platform: detect it, then produce actionable next-step advice
- * based on the detection result. Never throws.
- *
- * The returned object always has:
- *   - status: the detection status
- *   - healthy: boolean (true iff status === "active")
- *   - advice: array of short, actionable strings (empty when healthy)
- *   - result: the raw detection envelope
- *
- * @param {string} name platform name
- * @param {object} [options] passed through to detect()
- * @returns {Promise<{status: string, healthy: boolean, advice: string[], result: object}>}
- */
 export async function diagnosePlatform(name, options = {}) {
-  let result;
-  try {
-    result = await detectPlatform(name, options);
-  } catch (error) {
-    result = { detected: false, status: "error", details: { error: error.message } };
-  }
-
-  const healthy = result.status === "active";
+  const result = await detectPlatform(name, options);
   const advice = [];
 
-  switch (name) {
-    case "tray":
-      if (result.status === "not_configured") {
-        if (result.details?.reason === "macOS only") {
-          advice.push("Tray app is macOS-only; on this platform it will remain unavailable.");
-        } else {
-          advice.push("Build the bundle: npm run macos:bundle");
-          advice.push("Open it once: open dist/EOS.app");
-        }
-      } else if (result.status === "ready") {
-        advice.push("EOS.app is built but the launchd core agent is not loaded.");
-        advice.push("Install it: npm run macos:install-core");
-        advice.push("Or just open the app: open dist/EOS.app");
-      }
-      break;
-
-    case "work":
-      if (result.status === "not_configured") {
-        advice.push("Bootstrap a workspace: npm run bootstrap -- /path/to/project \"Project Name\"");
-        advice.push("Start the workbench: npm run workbench -- /path/to/project 4180");
-        if (result.details?.searched?.length) {
-          advice.push(`Searched: ${result.details.searched.join(", ")}`);
-        }
-      }
-      break;
-
-    case "vault":
-      if (result.status === "not_configured") {
-        advice.push("The Vault is created automatically when you bootstrap or start the server.");
-        advice.push("Set EOS_VAULT_DIR to use a custom location.");
-      } else if (result.status === "ready") {
-        advice.push("Vault directory exists but is not Git-initialized.");
-        advice.push("Ensure git is installed; the server will initialize it on first write.");
-      }
-      break;
-
-    case "codex":
-      if (result.status === "not_configured") {
-        advice.push("Install the Codex CLI and ensure 'codex' is on your PATH.");
-        advice.push("Then bootstrap a workspace and run: npm run codex:preflight -- /path/to/project");
-      } else if (result.status === "ready") {
-        advice.push("Codex CLI is installed but the EOS relay is not registered for this workspace.");
-        if (result.details?.boundVaultDir) {
-          advice.push(`Relay is bound to vault: ${result.details.boundVaultDir}`);
-        }
-        advice.push("Register the relay: npm run codex:preflight -- <workspace-dir>");
-      }
-      break;
-
-    case "cloud":
-      if (result.status === "not_configured") {
-        advice.push("Dockerfile and render.yaml exist but neither Docker nor Render CLI is installed.");
-        advice.push("Install Docker or the Render CLI to deploy.");
-      } else if (result.status === "ready") {
-        if (result.details?.docker?.installed && !result.details?.docker?.daemonRunning) {
-          advice.push("Docker is installed but the daemon is not running. Start Docker Desktop.");
-        }
-        if (result.details?.render?.installed) {
-          advice.push("Render CLI is installed. Deploy with: render deploy");
-        }
-        // Fallback: ready (configs exist) but no deployment tool is installed/running
-        if (advice.length === 0) {
-          advice.push("Deployment configs exist. Install Docker or Render CLI to deploy.");
-          advice.push("Build with Docker: docker build -t experience-os . && docker run -p 8080:8080 experience-os");
-        }
-      }
-      break;
-
-    default:
-      if (result.status === "error") {
-        advice.push(result.details?.error || "Unknown platform error.");
-      }
+  if (result.status === "not_installed") {
+    advice.push(`先安装 ${PLATFORMS.find((host) => host.name === name)?.label || name}。`);
+  } else if (result.status === "available") {
+    advice.push("宿主已安装，但 EOS MCP 尚未注册。");
+  } else if (result.status === "configured") {
+    if (result.proof?.vaultBound === false) {
+      advice.push("EOS MCP 已注册，但绑定的是另一个 Vault。");
+    }
+    if (!result.proof?.hostConfirmed) {
+      advice.push("检测到配置文件，但宿主尚未提供已加载该配置的证据。");
+    }
+    if (!result.proof?.relayConformant) {
+      advice.push("EOS Relay 未通过 MCP 握手，不能标记为可调用。");
+    }
+  } else if (result.status === "callable") {
+    advice.push("MCP 已可调用；只有收到真实、经许可的宿主事件后才会升级为“已观测”。");
+  } else if (result.status === "error") {
+    advice.push(result.details?.error || "连接检测发生错误。");
   }
 
-  if (healthy) {
-    advice.length = 0; // no advice needed when healthy
-  }
-
-  return { status: result.status, healthy, advice, result };
-}
-
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  checkPlatformHealth()
-    .then((result) => console.log(JSON.stringify(result, null, 2)))
-    .catch((error) => { console.error(`EOS platform adapter failed: ${error.message}`); process.exitCode = 1; });
+  return {
+    status: result.status,
+    healthy: result.compatibilityLevel >= 3,
+    advice,
+    result
+  };
 }

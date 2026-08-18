@@ -53,7 +53,7 @@
  *   - 不做国际化/用户友好的错误消息，issues 是英文技术短语，面向开发者而非终端用户。
  *   - 不做性能优化（如缓存编译后的 schema），记录数量级在万条以内，线性扫描足够。
  */
-import { SKILL_STATUSES, PREFERENCE_STATUSES, REVIEW_PACKET_STATUSES, PRICING_MODELS, LICENSE_TYPES, LISTING_STATUSES, TRANSACTION_TYPES, TRANSACTION_STATUSES, AUTONOMY_MODES, PROJECT_STATUSES, EVIDENCE_TYPES, OUTCOME_STATES, EXPERIENCE_ASSET_STATUSES, EXPERIENCE_RECEIPT_DRAFT_STATUSES, CODE_GRAPH_PATTERN_TYPES } from "./domain.js";
+import { SKILL_STATUSES, PORTABLE_SKILL_SCHEMA_VERSION, HOST_OBSERVATION_HOSTS, HOST_OBSERVATION_CATEGORIES, HOST_OBSERVATION_EVENTS, PREFERENCE_STATUSES, REVIEW_PACKET_STATUSES, PRICING_MODELS, LICENSE_TYPES, LISTING_STATUSES, TRANSACTION_TYPES, TRANSACTION_STATUSES, AUTONOMY_MODES, PROJECT_STATUSES, EVIDENCE_TYPES, OUTCOME_STATES, EXPERIENCE_ASSET_STATUSES, EXPERIENCE_RECEIPT_DRAFT_STATUSES, CODE_GRAPH_PATTERN_TYPES } from "./domain.js";
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -73,6 +73,10 @@ function hasNumber(value) {
 
 function hasOptionalString(value) {
   return value === null || value === undefined || hasString(value);
+}
+
+function isStringArray(value) {
+  return hasArray(value) && value.every(hasString);
 }
 
 function isOneOf(value, allowed) {
@@ -141,7 +145,74 @@ export function validateSkillForProduction(skill) {
   if (!hasOptionalString(skill?.reviewedAt)) {
     issues.push("skill.reviewedAt must be null or string");
   }
+  if (skill?.schemaVersion !== undefined && skill.schemaVersion !== PORTABLE_SKILL_SCHEMA_VERSION) {
+    issues.push(`skill.schemaVersion must be ${PORTABLE_SKILL_SCHEMA_VERSION}`);
+  }
+  if (skill?.version !== undefined && !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(skill.version)) {
+    issues.push("skill.version must be a semantic version");
+  }
+  if (!hasOptionalString(skill?.instructions)) {
+    issues.push("skill.instructions must be null or a non-empty string");
+  }
+  if (skill?.evidenceLinkIds !== undefined && !isStringArray(skill.evidenceLinkIds)) {
+    issues.push("skill.evidenceLinkIds must be an array of non-empty strings");
+  }
+  validateSkillScope(skill?.appliesTo, issues);
+  validateSkillActivation(skill?.activation, issues);
+  validateSkillCapabilities(skill?.capabilities, issues);
+  if (skill?.targetOverrides !== undefined && !isObject(skill.targetOverrides)) {
+    issues.push("skill.targetOverrides must be an object");
+  }
+  if (skill?.degradation !== undefined && !isObject(skill.degradation)) {
+    issues.push("skill.degradation must be an object");
+  }
+  if (skill?.executionBinding !== undefined && skill.executionBinding !== null && !isObject(skill.executionBinding)) {
+    issues.push("skill.executionBinding must be null or an object");
+  }
+  if (skill?.validationPlan !== undefined && !isObject(skill.validationPlan)) {
+    issues.push("skill.validationPlan must be an object");
+  }
+  if (skill?.compatibilityReceipts !== undefined && !hasArray(skill.compatibilityReceipts)) {
+    issues.push("skill.compatibilityReceipts must be an array");
+  }
   return issues;
+}
+
+function validateSkillScope(scope, issues) {
+  if (scope === undefined || scope === "global") return;
+  if (!isObject(scope) || !isStringArray(scope.projects) || scope.projects.length === 0) {
+    issues.push('skill.appliesTo must be "global" or an object with non-empty projects');
+  }
+}
+
+function validateSkillActivation(activation, issues) {
+  if (activation === undefined) return;
+  if (!isObject(activation)) {
+    issues.push("skill.activation must be an object");
+    return;
+  }
+  if (activation.intents !== undefined && !isStringArray(activation.intents)) {
+    issues.push("skill.activation.intents must be an array of non-empty strings");
+  }
+  if (activation.signals !== undefined && !isStringArray(activation.signals)) {
+    issues.push("skill.activation.signals must be an array of non-empty strings");
+  }
+  if (activation.priority !== undefined && !hasNumber(activation.priority)) {
+    issues.push("skill.activation.priority must be a finite number");
+  }
+}
+
+function validateSkillCapabilities(capabilities, issues) {
+  if (capabilities === undefined) return;
+  if (!isObject(capabilities)) {
+    issues.push("skill.capabilities must be an object");
+    return;
+  }
+  for (const field of ["required", "optional", "denied"]) {
+    if (capabilities[field] !== undefined && !isStringArray(capabilities[field])) {
+      issues.push(`skill.capabilities.${field} must be an array of non-empty strings`);
+    }
+  }
 }
 
 export function validateHumanEditLog(editLog) {
@@ -172,6 +243,52 @@ export function validateConversationEvent(event) {
   }
   if (event?.capturePermitId !== null && event?.capturePermitId !== undefined && !hasString(event.capturePermitId)) {
     issues.push("conversationEvent.capturePermitId must be a non-empty string when present");
+  }
+  return issues;
+}
+
+export function validateHostObservationConsent(consent) {
+  const issues = [];
+  if (!hasString(consent?.id)) issues.push("hostObservationConsent.id is required");
+  if (!hasString(consent?.projectId)) issues.push("hostObservationConsent.projectId is required");
+  if (!HOST_OBSERVATION_HOSTS.includes(consent?.host)) issues.push("hostObservationConsent.host is invalid");
+  if (!["active", "revoked"].includes(consent?.status)) issues.push("hostObservationConsent.status is invalid");
+  if (consent?.scope !== "metadata_only") issues.push("hostObservationConsent.scope must be metadata_only");
+  if (consent?.captureTokenHash !== null && consent?.captureTokenHash !== undefined
+    && !/^sha256:[a-f0-9]{64}$/.test(consent.captureTokenHash)) {
+    issues.push("hostObservationConsent.captureTokenHash must be null or a SHA-256 digest");
+  }
+  if (!hasString(consent?.approvedBy)) issues.push("hostObservationConsent.approvedBy is required");
+  if (!hasString(consent?.approvedAt)) issues.push("hostObservationConsent.approvedAt is required");
+  if (consent?.revokedAt !== null && consent?.revokedAt !== undefined && !hasString(consent.revokedAt)) {
+    issues.push("hostObservationConsent.revokedAt must be null or a timestamp");
+  }
+  return issues;
+}
+
+export function validateHostObservation(observation) {
+  const issues = [];
+  if (!hasString(observation?.id)) issues.push("hostObservation.id is required");
+  if (!hasString(observation?.projectId)) issues.push("hostObservation.projectId is required");
+  if (!HOST_OBSERVATION_HOSTS.includes(observation?.host)) issues.push("hostObservation.host is invalid");
+  if (!HOST_OBSERVATION_EVENTS.includes(observation?.eventName)) issues.push("hostObservation.eventName is invalid");
+  if (!HOST_OBSERVATION_CATEGORIES.includes(observation?.eventCategory)) issues.push("hostObservation.eventCategory is invalid");
+  if (!/^sha256:[a-f0-9]{64}$/.test(observation?.sessionHash || "")) issues.push("hostObservation.sessionHash is invalid");
+  if (observation?.turnHash !== null && observation?.turnHash !== undefined && !/^sha256:[a-f0-9]{64}$/.test(observation.turnHash)) {
+    issues.push("hostObservation.turnHash is invalid");
+  }
+  for (const field of ["toolName", "permissionMode"]) {
+    if (observation?.[field] !== null && observation?.[field] !== undefined && !hasString(observation[field])) {
+      issues.push(`hostObservation.${field} must be null or a non-empty string`);
+    }
+  }
+  if (!["success", "failure", "unknown"].includes(observation?.outcome)) issues.push("hostObservation.outcome is invalid");
+  if (!hasString(observation?.consentId)) issues.push("hostObservation.consentId is required");
+  if (observation?.captureMode !== "metadata_only") issues.push("hostObservation.captureMode must be metadata_only");
+  if (observation?.metadataVersion !== 1) issues.push("hostObservation.metadataVersion must be 1");
+  if (!hasString(observation?.observedAt)) issues.push("hostObservation.observedAt is required");
+  for (const forbidden of ["content", "prompt", "response", "transcriptPath", "transcript_path", "toolInput", "tool_input", "toolResponse", "tool_response", "lastAssistantMessage", "last_assistant_message"]) {
+    if (forbidden in (observation || {})) issues.push(`hostObservation.${forbidden} is forbidden`);
   }
   return issues;
 }
@@ -663,6 +780,8 @@ export function validateRecord(record) {
   const validators = {
     Artifact: validateArtifact,
     ConversationEvent: validateConversationEvent,
+    HostObservationConsent: validateHostObservationConsent,
+    HostObservation: validateHostObservation,
     HumanEditLog: validateHumanEditLog,
     MotherSkillTrajectory: validateMotherSkillTrajectory,
     Project: validateProject,
@@ -700,6 +819,8 @@ export async function validateVault(vault) {
   const supportedKinds = [
     "Artifact",
     "ConversationEvent",
+    "HostObservationConsent",
+    "HostObservation",
     "HumanEditLog",
     "MotherSkillTrajectory",
     "Project",

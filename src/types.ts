@@ -45,18 +45,19 @@ export type WallType = typeof WALL_TYPES[keyof typeof WALL_TYPES];
 
 export const SKILL_LEVELS = {
   STRATEGIC: "strategic",
-  FUNCTIONAL: "functional"
+  FUNCTIONAL: "functional",
+  ATOMIC: "atomic"
 } as const;
 
 export type SkillLevel = typeof SKILL_LEVELS[keyof typeof SKILL_LEVELS];
 
 export const SKILL_STATUSES = [
   "candidate",
+  "candidate_retained",
   "candidate_confirmed",
   "stable",
-  "rejected",
   "needs_revision",
-  "promoted"
+  "rejected"
 ] as const;
 
 export type SkillStatus = typeof SKILL_STATUSES[number];
@@ -203,6 +204,36 @@ export interface ConversationEvent extends BaseRecord {
   capturePermitId?: string | null;
 }
 
+export interface HostObservationConsent extends BaseRecord {
+  kind: "HostObservationConsent";
+  projectId: string;
+  host: "codex" | "claude" | "cursor" | "trae" | "vscode";
+  status: "active" | "revoked";
+  scope: "metadata_only";
+  /** SHA-256 only. The raw local Hook credential is never persisted in the Vault. */
+  captureTokenHash: string | null;
+  approvedBy: string;
+  approvedAt: string;
+  revokedAt: string | null;
+}
+
+export interface HostObservation extends BaseRecord {
+  kind: "HostObservation";
+  metadataVersion: 1;
+  projectId: string;
+  host: "codex" | "claude" | "cursor" | "trae" | "vscode";
+  eventName: string;
+  eventCategory: "session" | "turn" | "tool" | "lifecycle";
+  sessionHash: string;
+  turnHash: string | null;
+  toolName: string | null;
+  permissionMode: string | null;
+  outcome: "success" | "failure" | "unknown";
+  consentId: string;
+  captureMode: "metadata_only";
+  observedAt: string;
+}
+
 export interface ExperienceAsset extends BaseRecord {
   kind: "ExperienceAsset";
   projectId: string;
@@ -289,6 +320,29 @@ export interface Skill extends BaseRecord {
   promotionGate: string | null;
   lastReviewDecisionId: string | null;
   reviewedAt: string | null;
+  schemaVersion?: "experience-os.dev/portable-skill/v2";
+  version?: string;
+  instructions?: string | null;
+  evidenceLinkIds?: string[];
+  appliesTo?: "global" | { projects: string[] };
+  activation?: {
+    intents?: string[];
+    signals?: string[];
+    priority?: number;
+  };
+  capabilities?: {
+    required?: string[];
+    optional?: string[];
+    denied?: string[];
+  };
+  targetOverrides?: Record<string, unknown>;
+  degradation?: Record<string, unknown>;
+  executionBinding?: Record<string, unknown> | null;
+  validationPlan?: {
+    checks?: string[];
+    evidenceRequired?: boolean;
+  };
+  compatibilityReceipts?: Array<Record<string, unknown>>;
   confidence?: number;
 }
 
@@ -521,6 +575,8 @@ export interface SkillRating extends BaseRecord {
 export type AnyRecord =
   | Project
   | ConversationEvent
+  | HostObservationConsent
+  | HostObservation
   | ThoughtFragment
   | Rule
   | Skill

@@ -222,8 +222,13 @@ function DraftReviewCard({ draft, submitting, onAccept, onReject, onDefer }) {
   );
 }
 
-export default function ProjectView({ refreshKey, toast }) {
+export default function ProjectView({ refreshKey, toast, openOnboarding }) {
   const { data, loading, error, refresh: refreshProjects } = useFetch(`/api/projects?t=${refreshKey}`);
+  const {
+    data: workspaceData,
+    loading: workspacesLoading,
+    error: workspacesError
+  } = useFetch(`/api/workspaces?t=${refreshKey}`);
   const projects = useMemo(
     () => [...(data?.records || [])].sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || "")),
     [data]
@@ -247,6 +252,14 @@ export default function ProjectView({ refreshKey, toast }) {
   const [checkpointForm, setCheckpointForm] = useState({ title: "", sourceTool: "codex", content: "", notes: "", consented: false });
   const [decisionForm, setDecisionForm] = useState({ action: "验证经验", rationale: "", reviewedBy: "human" });
   const [outcomeForm, setOutcomeForm] = useState({ outcome: "success", notes: "" });
+
+  useEffect(() => {
+    let active = true;
+    fetchLLMStatus()
+      .then((status) => { if (active) setLlmStatus(status); })
+      .catch(() => { if (active) setLlmStatus(null); });
+    return () => { active = false; };
+  }, [refreshKey]);
 
   useEffect(() => {
     if (pendingNewId.current) {
@@ -352,10 +365,12 @@ export default function ProjectView({ refreshKey, toast }) {
     ];
     const currentIndex = done.findIndex((d) => !d);
     const labels = ["保存节点", "确认收据", "人工审查", "结果验证", "升级资产"];
+    const hints = ["AI 汇报了什么", "你批准捕获了什么", "你拍板采纳或否决", "经验用对了没有", "沉淀为可复用 Skill"];
     const anchors = ["#checkpoint", "#drafts", "#validation", "#validation", "#readiness"];
     const stepCounts = [counts.checkpoints || 0, counts.receipts || 0, counts.decisions || 0, counts.outcomes || 0, assets.length];
     return labels.map((label, i) => ({
       label,
+      hint: hints[i],
       anchor: anchors[i],
       count: stepCounts[i],
       state: done[i] ? "done" : (i === currentIndex ? "current" : "todo")
@@ -607,20 +622,106 @@ export default function ProjectView({ refreshKey, toast }) {
   const evidenceUncertaintyError = uncertaintyError(evidenceForm.uncertainty);
   const receiptUncertaintyError = uncertaintyError(receiptForm.uncertainty);
 
+  const showDrafts = pendingDrafts.length > 0;
+  const showValidation = Boolean(latestReceipt || latestDecision);
+  const showReadiness = (readiness?.receipts?.length ?? 0) > 0;
+  const showSuggestions = suggestions.length > 0 || reuseTrials.length > 0;
+
+  const draftsPanelBody = (
+    <>
+                    <div className="section-head"><div><p className="eyebrow">第二步 · 确认</p><h3>由工作节点提出收据草案</h3><p>只读取最近三个已保存节点。AI 必须附着于已有来源；它提出，不替你下结论。</p>{llmStatus && <p className={llmStatus.isLive ? "trust-meta" : "notice warn"}>{llmStatus.isLive ? `真实模型已连接：${llmStatus.adapter}/${llmStatus.model}；草案仍需要你确认。` : llmStatus.mockDraftsAllowed ? "离线演练模式：草案会明确标为模拟，不计入真实模型质量证据。" : "真实模型尚未配置，草案生成已锁定；不会以模拟输出冒充 AI 结论。"}</p>}</div><button className="ghost-btn" type="button" disabled={submitting === "receipt-draft" || !(counts.checkpoints > 0) || (llmStatus !== null && !canGenerateDraft)} onClick={createDraft}>{llmStatus?.isLive ? "生成草案" : llmStatus?.mockDraftsAllowed ? "生成演练草案" : "需配置真实模型"}</button></div>
+                    {counts.checkpoints === 0 && <p className="empty">先保存一个工作节点，草案才有可引用的事实基础。</p>}
+                    <div className="receipt-draft-list">
+                      {pendingDrafts.map((draft) => <DraftReviewCard key={draft.id} draft={draft} submitting={submitting !== ""} onAccept={acceptDraft} onReject={rejectDraft} onDefer={deferDraft} />)}
+                      {pendingDrafts.length === 0 && counts.checkpoints > 0 && <p className="empty">还没有待确认草案。系统不会在后台自行提炼。</p>}
+                    </div>
+                    {historyDrafts.length > 0 && (
+                      <details className="advanced-path" style={{ marginTop: "12px" }}>
+                        <summary><IconChevronDown />草案历史（{historyDrafts.length}）<span className="advanced-note">已处理草案的留痕，原始节点不受影响</span></summary>
+                        <div className="receipt-draft-list" style={{ marginTop: "12px" }}>
+                          {historyDrafts.map((draft) => (
+                            <article className="trust-draft-card" style={{ borderColor: "var(--line)", borderStyle: "solid" }} key={draft.id}>
+                              <div>
+                                {draft.status === "accepted"
+                                  ? <TrustTag level="confirmed">已确认为收据</TrustTag>
+                                  : draft.status === "deferred"
+                                    ? <TrustTag level="source">已暂缓</TrustTag>
+                                    : <TrustTag level="source">已丢弃</TrustTag>}
+                                <strong>{draft.phase}</strong>
+                                <p>{truncate(draft.summary, 120)}</p>
+                              </div>
+                              <p className="trust-meta">模型 {draft.generatedBy?.provider}/{draft.generatedBy?.model} · {draft.id}</p>
+                              {draft.generatedBy?.mode === "rehearsal" && <span className="tag warn">离线演练</span>}
+                              {draft.generationWarnings?.map((warning) => <p className="timeline-meta" key={warning}>生成警告：{warning}</p>)}
+                              {draft.status === "deferred" && <button className="ghost-btn" type="button" disabled={submitting === `resume-draft-${draft.id}`} onClick={() => resumeDraft(draft)}>恢复审查</button>}
+                            </article>
+                          ))}
+                        </div>
+                      </details>
+                    )}
+    </>
+  );
+
   return (
     <div className="project-workspace">
-      <section className="project-intro">
-        <div>
-          <p className="eyebrow">3.0 Main Loop</p>
-          <h2>从真实工作开始</h2>
-          <p>先记录事实和上下文，再提炼经验。系统默认只提供建议；每一条沉淀都保留来源、边界与不确定性。</p>
-        </div>
-        <span className="tag accent">默认：advise</span>
-      </section>
+      {workspacesError ? (
+        <section className="workspace-registry">
+          <div className="error-banner">{workspacesError}</div>
+        </section>
+      ) : workspacesLoading && !workspaceData ? (
+        <div className="skeleton" style={{ height: "72px" }}>读取工作区</div>
+      ) : workspaceData?.workspaces?.length ? (
+        <details className="panel advanced-path workspace-fold">
+          <summary>
+            <IconChevronDown />
+            本机工作区 · {workspaceData.workspaces.length} 个已接入
+            <span className="advanced-note">已接入 ≠ 正在采集；只有宿主发来经许可事件后才进入监测</span>
+          </summary>
+          <div className="workspace-registry-list">
+            {workspaceData.workspaces.map((workspace) => {
+              const isCurrent = workspace.workspace === workspaceData.currentWorkspace;
+              return (
+                <article key={workspace.id} className="workspace-registry-item">
+                  <span className={`status-dot ${workspace.status === "ready" ? "ok" : "warn"}`} aria-hidden="true" />
+                  <div>
+                    <strong>{workspace.name}</strong>
+                    <code>{workspace.workspace}</code>
+                    <small>
+                      {(workspace.sourceHosts || []).map((host) => host === "vscode" ? "VS Code" : host.toUpperCase()).join(" · ") || "手动接入"}
+                      {" · "}
+                      {workspace.monitoringStatus === "awaiting_host_event" ? "等待宿主事件" : workspace.monitoringStatus}
+                    </small>
+                  </div>
+                  <span className={`tag ${isCurrent ? "accent" : ""}`}>{isCurrent ? "当前 Vault" : workspace.status}</span>
+                </article>
+              );
+            })}
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <button className="ghost-btn" type="button" onClick={openOnboarding}>发现或添加项目</button>
+          </div>
+        </details>
+      ) : (
+        <section className="workspace-registry">
+          <div className="section-head">
+            <div>
+              <p className="eyebrow">本机工作区</p>
+              <h3>EOS 已接入的项目</h3>
+              <p>这里显示控制层注册结果；“已接入”不等于“正在采集”，只有宿主发来经许可事件后才进入监测。</p>
+            </div>
+            <button className="ghost-btn" type="button" onClick={openOnboarding}>发现或添加项目</button>
+          </div>
+          <div className="workspace-empty">
+            <p>尚未注册本机项目。EOS 不会在未授权时扫描。</p>
+            <button className="primary-btn" type="button" onClick={openOnboarding}>开始受许可的项目发现</button>
+          </div>
+        </section>
+      )}
 
       <div className="project-layout">
         <aside className="project-list panel">
-          <div className="section-head"><h3>项目</h3><span className="pill">{projects.length}</span></div>
+          <div className="section-head"><h3>项目主线 · 当前 Vault</h3><span className="pill">{projects.length}</span></div>
+          <p className="muted rail-hint">点选切换右侧操作的项目，记录都存在当前 Vault 里</p>
           <div className="project-options">
             {projects.map((project) => <ProjectOption key={project.id} project={project} selected={project.id === selectedId} onSelect={setSelectedId} />)}
             {projects.length === 0 && <p className="empty">还没有项目。从右侧开始一项真实工作。</p>}
@@ -631,6 +732,20 @@ export default function ProjectView({ refreshKey, toast }) {
           {!selectedProject ? (
             <form className="panel project-form" onSubmit={submitProject}>
               <div className="section-head"><div><h2>开始一个项目</h2><p>这不是创建一个新的管理条目，而是把此刻要完成的工作变成可追溯的协作上下文。</p></div></div>
+              <div className="startup-checks" aria-label="启动检查">
+                <div>
+                  <span className="status-dot ok" aria-hidden="true" />
+                  <span><strong>本地记录已就绪</strong><small>项目和证据保存在当前 EOS Vault</small></span>
+                </div>
+                <div>
+                  <span className={`status-dot ${llmStatus?.isLive ? "ok" : "warn"}`} aria-hidden="true" />
+                  <span>
+                    <strong>{llmStatus?.isLive ? "AI 草案入口已连接" : "AI 草案入口待连接"}</strong>
+                    <small>{llmStatus?.isLive ? `${llmStatus.adapter}/${llmStatus.model}` : "仍可先创建项目并手动保存工作节点"}</small>
+                  </span>
+                </div>
+                <a className="ghost-btn" href="?view=platform">检查平台连接</a>
+              </div>
               <label>项目名称<input value={projectForm.name} onChange={(e) => setProjectForm({ ...projectForm, name: e.target.value })} placeholder="例如：Experience OS 3.0 Alpha" /></label>
               <label>你要达成什么<textarea value={projectForm.goal} onChange={(e) => setProjectForm({ ...projectForm, goal: e.target.value })} placeholder="用自己的话描述目标、问题或交付物。" /></label>
               <label>本次自治等级<select value={projectForm.autonomyMode} onChange={(e) => setProjectForm({ ...projectForm, autonomyMode: e.target.value })}>{MODES.map((mode) => <option key={mode}>{mode}</option>)}</select></label>
@@ -644,16 +759,22 @@ export default function ProjectView({ refreshKey, toast }) {
               </section>
 
               {trialEvidence && (
-                <section className="trial-evidence" aria-label="本项目的试用证据">
-                  <div><p className="eyebrow">试用证据</p><strong>系统只报告已发生的事实，不给这次项目虚构价值分数。</strong></div>
-                  <dl>
-                    <div><dt>已处理草案</dt><dd>{trialEvidence.draftReview?.handled ?? 0} 份{trialEvidence.draftReview?.medianReviewMs != null ? ` · 中位 ${Math.round(trialEvidence.draftReview.medianReviewMs / 1000)} 秒` : ""}</dd></div>
-                    <div><dt>来源覆盖</dt><dd>{trialEvidence.evidenceCoverage?.ratio == null ? "尚无收据" : `${Math.round(trialEvidence.evidenceCoverage.ratio * 100)}%`}</dd></div>
-                    <div><dt>已验证经验</dt><dd>{trialEvidence.verification?.approvedAssets ?? 0} 条</dd></div>
-                    <div><dt>复用试验</dt><dd>{trialEvidence.reuseTrials?.completed ?? 0} 完成 / {trialEvidence.reuseTrials?.total ?? 0} 发起</dd></div>
-                  </dl>
-                  {trialEvidence.interpretation?.isSufficientForValueClaim === false && <p className="trial-note">还不能宣称 EOS 已产生复用价值：{trialEvidence.interpretation?.missingEvidence?.[0] ?? "证据不足"}</p>}
-                </section>
+                <details className="panel advanced-path trial-fold" aria-label="本项目的试用证据">
+                  <summary>
+                    <IconChevronDown />
+                    试用证据 · 草案 {trialEvidence.draftReview?.handled ?? 0} 份 · 覆盖 {trialEvidence.evidenceCoverage?.ratio == null ? "—" : `${Math.round(trialEvidence.evidenceCoverage.ratio * 100)}%`} · 已验证 {trialEvidence.verification?.approvedAssets ?? 0} 条
+                    <span className="advanced-note">系统只报告已发生的事实，不给这次项目虚构价值分数</span>
+                  </summary>
+                  <div className="trial-evidence">
+                    <dl>
+                      <div><dt>已处理草案</dt><dd>{trialEvidence.draftReview?.handled ?? 0} 份{trialEvidence.draftReview?.medianReviewMs != null ? ` · 中位 ${Math.round(trialEvidence.draftReview.medianReviewMs / 1000)} 秒` : ""}</dd></div>
+                      <div><dt>来源覆盖</dt><dd>{trialEvidence.evidenceCoverage?.ratio == null ? "尚无收据" : `${Math.round(trialEvidence.evidenceCoverage.ratio * 100)}%`}</dd></div>
+                      <div><dt>已验证经验</dt><dd>{trialEvidence.verification?.approvedAssets ?? 0} 条</dd></div>
+                      <div><dt>复用试验</dt><dd>{trialEvidence.reuseTrials?.completed ?? 0} 完成 / {trialEvidence.reuseTrials?.total ?? 0} 发起</dd></div>
+                    </dl>
+                    {trialEvidence.interpretation?.isSufficientForValueClaim === false && <p className="trial-note">还不能宣称 EOS 已产生复用价值：{trialEvidence.interpretation?.missingEvidence?.[0] ?? "证据不足"}</p>}
+                  </div>
+                </details>
               )}
 
               {!timeline ? (
@@ -681,6 +802,7 @@ export default function ProjectView({ refreshKey, toast }) {
                           >
                             <span className="loop-index">{step.state === "done" ? "✓" : `0${i + 1}`}</span>
                             <strong>{step.label}</strong>
+                            <small className="loop-hint">{step.hint}</small>
                             <span className="loop-count">{step.count} 条</span>
                           </a>
                         </li>
@@ -735,39 +857,18 @@ export default function ProjectView({ refreshKey, toast }) {
                     </details>
                   )}
 
+                  {showDrafts ? (
                   <section className="panel receipt-draft-panel" id="drafts">
-                    <div className="section-head"><div><p className="eyebrow">第二步 · 确认</p><h3>由工作节点提出收据草案</h3><p>只读取最近三个已保存节点。AI 必须附着于已有来源；它提出，不替你下结论。</p>{llmStatus && <p className={llmStatus.isLive ? "trust-meta" : "notice warn"}>{llmStatus.isLive ? `真实模型已连接：${llmStatus.adapter}/${llmStatus.model}；草案仍需要你确认。` : llmStatus.mockDraftsAllowed ? "离线演练模式：草案会明确标为模拟，不计入真实模型质量证据。" : "真实模型尚未配置，草案生成已锁定；不会以模拟输出冒充 AI 结论。"}</p>}</div><button className="ghost-btn" type="button" disabled={submitting === "receipt-draft" || !(counts.checkpoints > 0) || (llmStatus !== null && !canGenerateDraft)} onClick={createDraft}>{llmStatus?.isLive ? "生成草案" : llmStatus?.mockDraftsAllowed ? "生成演练草案" : "需配置真实模型"}</button></div>
-                    {counts.checkpoints === 0 && <p className="empty">先保存一个工作节点，草案才有可引用的事实基础。</p>}
-                    <div className="receipt-draft-list">
-                      {pendingDrafts.map((draft) => <DraftReviewCard key={draft.id} draft={draft} submitting={submitting !== ""} onAccept={acceptDraft} onReject={rejectDraft} onDefer={deferDraft} />)}
-                      {pendingDrafts.length === 0 && counts.checkpoints > 0 && <p className="empty">还没有待确认草案。系统不会在后台自行提炼。</p>}
-                    </div>
-                    {historyDrafts.length > 0 && (
-                      <details className="advanced-path" style={{ marginTop: "12px" }}>
-                        <summary><IconChevronDown />草案历史（{historyDrafts.length}）<span className="advanced-note">已处理草案的留痕，原始节点不受影响</span></summary>
-                        <div className="receipt-draft-list" style={{ marginTop: "12px" }}>
-                          {historyDrafts.map((draft) => (
-                            <article className="trust-draft-card" style={{ borderColor: "var(--line)", borderStyle: "solid" }} key={draft.id}>
-                              <div>
-                                {draft.status === "accepted"
-                                  ? <TrustTag level="confirmed">已确认为收据</TrustTag>
-                                  : draft.status === "deferred"
-                                    ? <TrustTag level="source">已暂缓</TrustTag>
-                                    : <TrustTag level="source">已丢弃</TrustTag>}
-                                <strong>{draft.phase}</strong>
-                                <p>{truncate(draft.summary, 120)}</p>
-                              </div>
-                              <p className="trust-meta">模型 {draft.generatedBy?.provider}/{draft.generatedBy?.model} · {draft.id}</p>
-                              {draft.generatedBy?.mode === "rehearsal" && <span className="tag warn">离线演练</span>}
-                              {draft.generationWarnings?.map((warning) => <p className="timeline-meta" key={warning}>生成警告：{warning}</p>)}
-                              {draft.status === "deferred" && <button className="ghost-btn" type="button" disabled={submitting === `resume-draft-${draft.id}`} onClick={() => resumeDraft(draft)}>恢复审查</button>}
-                            </article>
-                          ))}
-                        </div>
-                      </details>
-                    )}
+                    {draftsPanelBody}
                   </section>
+                  ) : (
+                    <details className="panel advanced-path step-fold" id="drafts">
+                      <summary><IconChevronDown />第二步 · 收据草案 — 暂无待确认<span className="advanced-note">工作节点已就绪时可展开生成草案</span></summary>
+                      <div style={{ marginTop: 12 }}>{draftsPanelBody}</div>
+                    </details>
+                  )}
 
+                  {showValidation ? (
                   <section className="project-validation" id="validation">
                     <div className="section-head"><div><p className="eyebrow">第三、四步 · 审查与验证</p><h3>人工审查与结果验证</h3><p>一段经验必须先有证据、被人审查、再被真实结果验证，才会成为可复用资产。每个表单都明确显示它正在作用的对象。</p></div></div>
                     <div className="project-actions">
@@ -803,7 +904,14 @@ export default function ProjectView({ refreshKey, toast }) {
                       )}
                     </div>
                   </section>
+                  ) : (
+                    <details className="panel advanced-path step-fold" id="validation">
+                      <summary><IconChevronDown />第三、四步 · 审查与验证 — 暂无待审查收据<span className="advanced-note">确认一份草案后，表单会在这里出现</span></summary>
+                      <p className="empty" style={{ marginTop: 12 }}>确认一份收据草案后，"人工审查决策"与"观察实际结果"两个表单会在这里出现。</p>
+                    </details>
+                  )}
 
+                  {showReadiness ? (
                   <section className="panel" id="readiness">
                     <div className="section-head"><div><p className="eyebrow">第五步 · 升级</p><h3>验证与升级资格</h3><p>系统逐条解释每张收据距离“可复用经验”还差什么；升级是不可逆动作，需要两次点击确认。</p></div><span className="pill">{assets.length} 已升级</span></div>
                     <div className="readiness-list">
@@ -838,7 +946,14 @@ export default function ProjectView({ refreshKey, toast }) {
                       {readiness?.receipts?.length === 0 && <p className="empty">先生成一条 Experience Receipt，系统会在这里解释它离可复用还差什么。</p>}
                     </div>
                   </section>
+                  ) : (
+                    <details className="panel advanced-path step-fold" id="readiness">
+                      <summary><IconChevronDown />第五步 · 升级资格 — 暂无可升级收据<span className="advanced-note">经验需过证据、审查、结果验证三关</span></summary>
+                      <p className="empty" style={{ marginTop: 12 }}>生成 Experience Receipt 后，系统会在这里解释它离"可复用经验"还差什么。</p>
+                    </details>
+                  )}
 
+                  {showSuggestions ? (
                   <section className="panel receipt-draft-panel" id="suggestions">
                     <div className="section-head"><div><p className="eyebrow">下次可用</p><h3>已验证经验建议</h3><p>只显示其他项目中已经过证据、审查和结果验证的经验。不会自动套用；拒绝可以留下原因。</p></div><span className="pill">最多 3 条</span></div>
                     <div className="receipt-draft-list">
@@ -856,6 +971,12 @@ export default function ProjectView({ refreshKey, toast }) {
                     </div>
                     {reuseTrials.length > 0 && <div className="receipt-draft-list" style={{ marginTop: "12px" }}>{reuseTrials.map((trial) => <ReuseTrialCard key={trial.id} trial={trial} submitting={submitting === `reuse-trial-${trial.id}`} onComplete={completeReuseTrial} />)}</div>}
                   </section>
+                  ) : (
+                    <details className="panel advanced-path step-fold" id="suggestions">
+                      <summary><IconChevronDown />下次可用 · 已验证经验建议 — 暂无<span className="advanced-note">其他项目验证过的经验会出现在这里</span></summary>
+                      <p className="empty" style={{ marginTop: 12 }}>还没有与当前项目足够相关的已验证经验。</p>
+                    </details>
+                  )}
 
                   <details className="panel advanced-path" id="advanced">
                     <summary><IconChevronDown />高级路径：直接记录证据或收据<span className="advanced-note">通常不需要——保存工作节点已自动创建可引用证据</span></summary>
@@ -890,11 +1011,19 @@ export default function ProjectView({ refreshKey, toast }) {
                   </details>
 
                   <section className="panel timeline-panel" id="timeline">
-                    <div className="section-head"><div><p className="eyebrow">来源链</p><h3>项目时间线</h3><p>你能看到系统依据什么形成了每一段经验。</p></div><span className="pill">{timelineItems.length}</span></div>
+                    <div className="section-head"><div><p className="eyebrow">来源链</p><h3>项目时间线 · 最近 {Math.min(3, timelineItems.length)} 条</h3><p>你能看到系统依据什么形成了每一段经验。</p></div><span className="pill">{timelineItems.length}</span></div>
                     <div className="timeline-list">
-                      {timelineItems.map((item) => <TimelineItem key={`${item.kind}-${item.record.id}`} item={item} />)}
+                      {timelineItems.slice(0, 3).map((item) => <TimelineItem key={`${item.kind}-${item.record.id}`} item={item} />)}
                       {timelineItems.length === 0 && <p className="empty">从保存一个工作节点开始，这里会逐步长出完整的来源链。</p>}
                     </div>
+                    {timelineItems.length > 3 && (
+                      <details className="advanced-path timeline-more">
+                        <summary><IconChevronDown />其余 {timelineItems.length - 3} 条<span className="advanced-note">更早的节点、许可与收据</span></summary>
+                        <div className="timeline-list" style={{ marginTop: 12 }}>
+                          {timelineItems.slice(3).map((item) => <TimelineItem key={`${item.kind}-${item.record.id}`} item={item} />)}
+                        </div>
+                      </details>
+                    )}
                   </section>
                 </>
               )}

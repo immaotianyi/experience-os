@@ -10,6 +10,8 @@ import {
   validateSkillForProduction,
   validateHumanEditLog,
   validateConversationEvent,
+  validateHostObservationConsent,
+  validateHostObservation,
   validateThoughtFragment,
   validateRule,
   validateSubgoalSegment,
@@ -28,7 +30,7 @@ import {
   wallTypeForIssue
 } from "../src/validate.js";
 
-import { createSkillCandidate, createProject, createWallHit } from "../src/domain.js";
+import { createSkillCandidate, createProject, createWallHit, createHostObservationConsent, createHostObservation } from "../src/domain.js";
 
 describe("validateProject", () => {
   it("passes for valid project", () => {
@@ -38,6 +40,41 @@ describe("validateProject", () => {
 
   it("fails for missing id", () => {
     assert.ok(validateProject({ name: "N", goal: "G" }).length > 0);
+  });
+});
+
+describe("host observation validation", () => {
+  const consent = createHostObservationConsent({
+    id: "host_consent.p1.codex",
+    projectId: "p1",
+    host: "codex",
+    approvedBy: "human"
+  });
+  const observation = createHostObservation({
+    id: "host_observation.codex.1",
+    projectId: "p1",
+    host: "codex",
+    eventName: "SessionStart",
+    eventCategory: "session",
+    sessionHash: `sha256:${"a".repeat(64)}`,
+    consentId: consent.id
+  });
+
+  it("accepts explicit metadata-only consent and observation records", () => {
+    assert.deepEqual(validateHostObservationConsent(consent), []);
+    assert.deepEqual(validateHostObservation(observation), []);
+    assert.deepEqual(validateRecord(consent), []);
+    assert.deepEqual(validateRecord(observation), []);
+  });
+
+  it("rejects any raw collaboration field on an observation", () => {
+    const issues = validateHostObservation({ ...observation, prompt: "do not persist me" });
+    assert.ok(issues.includes("hostObservation.prompt is forbidden"));
+  });
+
+  it("rejects a persisted raw capture credential in the consent hash field", () => {
+    const issues = validateHostObservationConsent({ ...consent, captureTokenHash: "host_capture.raw" });
+    assert.ok(issues.includes("hostObservationConsent.captureTokenHash must be null or a SHA-256 digest"));
   });
 });
 
@@ -73,6 +110,31 @@ describe("validateSkillForProduction", () => {
     s.status = "bogus";
     const issues = validateSkillForProduction(s);
     assert.ok(issues.some((i) => i.includes("status")));
+  });
+
+  it("validates optional PortableSkill v2 fields without rejecting legacy records", () => {
+    const s = createSkillCandidate({
+      id: "s1", projectId: "p1", name: "N", origin: "o",
+      trigger: { intent: "i", signals: ["sig"] },
+      inputSchema: {}, outputSchema: {},
+      safetyLevel: "L1", fallback: "f", humanConfirmationRequired: true,
+      instructions: "Perform the verified workflow.",
+      capabilities: { required: ["ide.files.read"], optional: [], denied: [] }
+    });
+    assert.equal(validateSkillForProduction(s).length, 0);
+
+    const legacy = { ...s };
+    for (const field of [
+      "schemaVersion", "version", "instructions", "evidenceLinkIds", "appliesTo",
+      "activation", "capabilities", "targetOverrides", "degradation",
+      "executionBinding", "validationPlan", "compatibilityReceipts"
+    ]) delete legacy[field];
+    assert.equal(validateSkillForProduction(legacy).length, 0);
+
+    const invalid = { ...s, version: "latest", appliesTo: { projects: [] } };
+    const issues = validateSkillForProduction(invalid);
+    assert.ok(issues.some((issue) => issue.includes("semantic version")));
+    assert.ok(issues.some((issue) => issue.includes("appliesTo")));
   });
 });
 

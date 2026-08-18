@@ -30,6 +30,8 @@ import {
   computeBlastRadius,
   normalizeGraphSnapshot
 } from "./eosCodeGraphAdapter.js";
+import { EOS_VERSION } from "./version.js";
+import { createRelayObserver } from "./eosRelayObserver.js";
 
 // GitVault may announce initialization. MCP stdout must contain JSON-RPC only.
 console.log = (...args) => stderr.write(`[EOS Relay] ${args.join(" ")}\n`);
@@ -39,6 +41,10 @@ const vault = new GitVault(vaultDir);
 const eosDir = path.dirname(vaultDir);
 const strictCapture = process.env.EOS_CAPTURE_POLICY === "strict_permit";
 await vault.init();
+
+// MCP-only hosts (TRAE/Cursor/VS Code) have no hooks; the relay observes
+// its own protocol lifecycle as their operational status.
+const observer = createRelayObserver({ vault, vaultDir });
 
 const TOOLS = [
   {
@@ -299,22 +305,29 @@ async function callTool(name, args = {}) {
 
 async function handleMessage(message) {
   if (message.method === "initialize") {
+    observer.report("SessionStart");
     return {
       jsonrpc: "2.0",
       id: message.id,
       result: {
         protocolVersion: "2024-11-05",
         capabilities: { tools: {} },
-        serverInfo: { name: "experience-os-capture-relay", version: "3.0.0" }
+        serverInfo: { name: "experience-os-capture-relay", version: EOS_VERSION }
       }
     };
   }
   if (message.method === "notifications/initialized") return null;
   if (message.method === "tools/list") return { jsonrpc: "2.0", id: message.id, result: { tools: TOOLS } };
   if (message.method === "tools/call") {
+    const toolName = typeof message.params?.name === "string" ? message.params.name : null;
+    const turnId = message.id === undefined || message.id === null ? null : String(message.id);
+    observer.report("PreToolUse", { turnId, toolName });
     try {
-      return { jsonrpc: "2.0", id: message.id, result: await callTool(message.params?.name, message.params?.arguments) };
+      const result = await callTool(message.params?.name, message.params?.arguments);
+      observer.report(result?.isError ? "PostToolUseFailure" : "PostToolUse", { turnId, toolName });
+      return { jsonrpc: "2.0", id: message.id, result };
     } catch (error) {
+      observer.report("PostToolUseFailure", { turnId, toolName });
       return { jsonrpc: "2.0", id: message.id, result: textResult({ error: error.message }, true) };
     }
   }
@@ -348,6 +361,15 @@ stdin.on("data", (chunk) => {
   }
 });
 
-// Exit cleanly when stdin closes (MCP client disconnected)
-stdin.on("end", () => process.exit(0));
-stdin.on("close", () => process.exit(0));
+// Exit cleanly when stdin closes (MCP client disconnected).
+// SessionEnd is observational: bounded wait, then exit regardless.
+// stdin emits both "end" and "close"; without a guard the second invocation
+// exits the process while the first is still delivering SessionEnd.
+let shuttingDown = false;
+const closeOnce = () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  observer.close().finally(() => process.exit(0));
+};
+stdin.on("end", closeOnce);
+stdin.on("close", closeOnce);

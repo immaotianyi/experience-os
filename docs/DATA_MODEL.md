@@ -2,7 +2,7 @@
 
 ## 总览
 
-EOS 的 Vault 存储 30 种 record kind，按业务域分组如下。每种 kind 对应 `vault.js` 中 `COLLECTION_DIR` 的一个子目录，每条记录是一个独立的 JSON 文件。
+EOS 的 Vault 存储 31 种 record kind，按业务域分组如下。每种 kind 对应 `vault.js` 中 `COLLECTION_DIR` 的一个子目录，每条记录是一个独立的 JSON 文件。
 
 ### 项目域
 - `Project` — 项目（顶层容器）
@@ -516,12 +516,33 @@ ID 中的 `<slug>` 部分通常通过 `utils.slug()` 生成（中文项目名通
 | `leaf` | 叶子节点，无出边 |
 | `bridge` | 连接两个不连通簇的节点 |
 
+## 宿主观察记录
+
+### HostObservationConsent
+
+项目与宿主之间的独立、可撤销许可。`scope` 固定为 `metadata_only`，状态只有
+`active` / `revoked`。它不同于协作正文的 CapturePermit：允许观察生命周期元数据，
+不代表允许读取聊天、源码或 transcript。
+
+`id` 只是可审计引用，不是调用秘密。每次人类重新授权都会轮换 `captureToken`；记录中仅保存
+`captureTokenHash`，撤销时清空。原始凭据只保存在工作区外的私有文件中，权限为 `0600`。
+
+### HostObservation
+
+证明一个经许可的宿主生命周期事件实际到达 EOS。会话和 turn 标识在 Hook 进程内加盐
+SHA-256 后才发送；服务端只接受白名单字段，并自行推导事件类别、结果与接收时间。
+同一许可、事件、会话和 turn 的重复投递幂等，不重复增长 Vault。
+
+该记录是平台兼容等级 L4 的唯一证据。历史 ConversationEvent 不再自动升级平台为
+`observing`，避免把用户主动提交或旧数据误报成持续宿主观察。
+
 ## 关系图（ASCII）
 
 ```
 Project 1────────────────────────────────────────────────────────┐
   │                                                               │
   ├──1:N── ConversationEvent ──1:1── ThoughtFragment              │
+  ├──1:N── HostObservationConsent ──1:N── HostObservation          │
   │              │                                                   │
   │              └──1:1── WorkCheckpoint ──1:1── EvidenceLink       │
   │                                                               │

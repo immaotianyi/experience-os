@@ -16,6 +16,7 @@
  */
 
 import { slug } from "./utils.js";
+import { inspectSkillPortability } from "./skillCompiler.js";
 
 /**
  * Build a local index of all stable Skills in the Vault.
@@ -70,6 +71,7 @@ export async function buildLocalIndex(vault) {
     const rate = approvalRate.get(skill.id) || { approved: 0, total: 0 };
     const usage = usageCount.get(skill.id) || 0;
     const approvalPct = rate.total > 0 ? rate.approved / rate.total : 0;
+    const portability = inspectSkillPortability(skill);
 
     return {
       id: skill.id,
@@ -89,7 +91,10 @@ export async function buildLocalIndex(vault) {
         const score = computeQualityScore({ reviews, approvalPct, usage });
         return { qualityScore: score, qualityGrade: computeQualityGrade(score) };
       })(),
-      mcpExportable: skill.status === "stable",
+      mcpExportable: portability.ready,
+      distributionReady: portability.ready,
+      distributionBlockers: portability.blockers,
+      distributionWarnings: portability.warnings,
       createdAt: skill.createdAt,
       updatedAt: skill.updatedAt,
       projectId: skill.projectId
@@ -189,7 +194,18 @@ export async function importSkill({ vault, skillData, projectId, source = "exter
     safetyLevel: skillData.safetyLevel || "L2",
     fallback: skillData.fallback || "Return error message to caller",
     humanConfirmationRequired: skillData.humanConfirmationRequired ?? true,
-    skillLevel: skillData.skillLevel || "functional"
+    skillLevel: skillData.skillLevel || "functional",
+    version: skillData.version || "0.1.0",
+    instructions: skillData.instructions || skillData.prompt || null,
+    evidenceLinkIds: skillData.evidenceLinkIds || [],
+    appliesTo: skillData.appliesTo,
+    activation: skillData.activation,
+    capabilities: skillData.capabilities,
+    targetOverrides: skillData.targetOverrides || {},
+    degradation: skillData.degradation,
+    executionBinding: skillData.executionBinding || null,
+    validationPlan: skillData.validationPlan,
+    compatibilityReceipts: []
   });
 
   // Imported skills start as candidates and must go through review

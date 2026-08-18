@@ -19,7 +19,7 @@
  *       d. 全局异常兜底（safeErrorMessage 过滤敏感信息后返回 400/500）
  *
  * API 端点分组（按业务域）：
- *   健康/平台：/api/health, /api/platforms, /api/platforms/:name/start, /api/platforms/:name/diagnose
+ *   健康/平台：/api/health, /api/platforms, /api/platforms/:name/start|connection-plan|connection-apply|diagnose
  *   Beta反馈： /api/beta-feedback (GET/POST), /api/beta-feedback/export
  *   审查：    /api/review-decisions, /api/review-audit, /api/skill-review-history
  *   Vault：   /api/vault-archive, /api/vault-maintenance, /api/validation, /api/summary,
@@ -34,6 +34,7 @@
  *   证据/收据：/api/evidence, /api/experience-receipt-drafts, /api/experience-receipt-drafts/accept|reject|defer|resume,
  *             /api/experience-receipts, /api/decisions, /api/outcomes
  *   Relay：   /api/relay/events (POST/GET) — Codex MCP relay 的事件上报端点
+ *   Hook观测：/api/host-observation-consents, /api/host-observations
  *   检查点：  /api/work-checkpoints (GET/POST)
  *   资产：    /api/experience-assets (GET/POST)
  *   技能市场：/api/marketplace/* (search/publish/unpublish/suspend/listing/versions/download/stats)
@@ -42,13 +43,13 @@
  *   团队审查：/api/team-review/* (assign/vote/discuss/summary/finalize)
  *   技能注册：/api/skill-registry, /api/skill-registry/import, /api/skills/metadata
  *   MCP导出： /api/mcp/export, /api/mcp/export-all, /api/mcp/list
- *   代码图谱：/api/code-graph/* (ingest/patterns/blast-radius)
+ *   代码图谱：/api/code-graph/* (ingest/parse-project/patterns/blast-radius)
  *   撞墙解决：/api/wallhit-resolutions, /api/wallhit-audit
  *
  * 关键不变量：
- *   1. 仅监听 127.0.0.1（EOS_HOST），不对外暴露；公网访问需通过 Docker/Render 部署模式。
- *   2. 所有写操作必须携带身份头（x-eos-identity），且经 accessControl 校验权限；
- *      读操作按角色过滤可见性（filterReadable）。
+ *   1. 本地模式默认仅监听 127.0.0.1，把回环边界视为可信单用户环境。
+ *   2. 非本地部署通过 x-eos-identity 传递可信身份；高风险操作要求 admin。
+ *      普通记录操作继续由 accessControl 按所有权与可见性检查。
  *   3. 错误响应统一走 safeErrorMessage，不把堆栈/文件路径/原始错误消息泄露给客户端。
  *   4. 静态文件只从 apps/web 或 apps/web-react/dist 提供，禁止路径穿越（resolve 后检查前缀）。
  *   5. Beta 反馈提交有 IP 级速率限制（betaFeedbackAttempts Map），每小时每 IP 最多 5 条。
@@ -56,12 +57,13 @@
  * 环境变量：
  *   PORT               监听端口，默认 4173
  *   EOS_HOST           绑定地址，默认 127.0.0.1
- *   EOS_VAULT_DIR      Vault 根目录，默认 work/vaults/real
+ *   EOS_VAULT_DIR      Vault 根目录，默认 work/vaults；真实工作区应显式指向 <workspace>/.eos/vault
  *   EOS_ALLOW_MOCK_DRAFTS  设为 "1" 时允许 mock LLM 草稿（演示用）
- *   EOS_DEPLOYMENT_MODE  "local"（默认）或 "cloud"（Docker/Render 部署时启用 CORS 宽松模式）
+ *   EOS_DEPLOYMENT_MODE  "local"（默认）、"private_beta" 或 "cloud"
+ *   EOS_AUTH_DEV_OTP     仅本地开发可设为 "1"，在界面显示本机验证码
  *
  * 不做什么：
- *   - 不做会话管理/JWT：身份完全由 x-eos-identity 头声明（本地可信环境；云端部署需前置反向代理鉴权）。
+ *   - 不保存密码；开发验证码会话只存在进程内。生产身份仍由受信 OIDC/反向代理提供。
  *   - 不做请求体 schema 校验（由 validate.js 在引擎层校验）。
  *   - 不做日志框架：用 console.log/error 输出到 stdout/stderr，由 launchd/Docker 收集。
  *   - 不做 WebSocket/SSE：当前所有端点都是 HTTP request-response；实时更新靠前端轮询。
@@ -74,6 +76,8 @@ import { fileURLToPath } from "node:url";
 import { GitVault } from "./gitVault.js";
 import { createLLMAdapter } from "./llmAdapter.js";
 import { buildAttentionSnapshot } from "./attentionStatus.js";
+import { buildAgentStatus } from "./agentStatus.js";
+import { promoteRegisteredWorkspaceBindings } from "./platformEvidence.js";
 import { submitBetaFeedback } from "./betaFeedback.js";
 import { applyReviewDecision } from "./reviewEngine.js";
 import { validateVault } from "./validate.js";
@@ -81,9 +85,41 @@ import { archiveVaultCandidates, buildVaultMaintenancePreview } from "./vaultMai
 import { latest, slug } from "./utils.js";
 import { exportSkillAsMcpServer, exportAllStableSkills } from "./mcpExporter.js";
 import { buildLocalIndex, searchIndex, importSkill, getSkillMetadata, listCategories } from "./skillRegistry.js";
+import { listPresetSkills, installPresetSkills, PRESET_SCHEMA_VERSION } from "./eosPresetSkills.js";
 import { assignReviewers, submitVote, addDiscussionComment, checkConfirmationStatus, finalizeTeamReview, getReviewSummary } from "./teamReviewEngine.js";
-import { applyOwnership, canRead, canEdit, canReview, filterReadable, contextFromRequest } from "./accessControl.js";
-import { checkPlatformHealth, tryStartPlatform, getInstallInstructions } from "./eosPlatformAdapter.js";
+import {
+  applyOwnership,
+  canRead,
+  canEdit,
+  canReview,
+  filterReadable,
+  contextFromRequest,
+  hasPrivilegedAccess
+} from "./accessControl.js";
+import {
+  buildPlatformConnectionPlan,
+  checkPlatformHealth,
+  tryStartPlatform,
+  getInstallInstructions,
+  PLATFORMS
+} from "./eosPlatformAdapter.js";
+import { HostConnectionCoordinator } from "./hostConnectionCoordinator.js";
+import { HostHookCoordinator } from "./hostHookCoordinator.js";
+import { hostHookConfigPath, hostObservationTokenPath } from "./hostHookPlan.js";
+import { createSessionLogWatcher } from "./eosSessionLogWatcher.js";
+import { createAgentbarReader, defaultAgentbarStateDir } from "./agentbarReader.js";
+import { inspectHostHookInstallation } from "./hostHookTransaction.js";
+import {
+  approveHostObservationConsent,
+  revokeHostObservationConsent,
+  recordHostObservation,
+  listHostObservations,
+  verifyHostObservationCaptureToken
+} from "./hostObservationEngine.js";
+import { AuthService } from "./authService.js";
+import { discoverHostProjects, inspectManualProject } from "./onboardingDiscovery.js";
+import { WorkspaceRegistry } from "./workspaceRegistry.js";
+import { HostDiscoveryStore } from "./hostDiscoveryStore.js";
 import { publishSkill, unpublishSkill, suspendListing, searchMarketplace, getListingDetails, listPublishedVersions, recordDownload, getMarketplaceStats } from "./marketplace.js";
 import { submitRating, getRatingSummary, getSkillQualityReport, autoFlagLowQuality, getQualityLeaderboard } from "./qualityRating.js";
 import { validatePricing, calculateCommission, checkTrial, computePurchaseBreakdown, verifyLicenseKey } from "./pricingEngine.js";
@@ -129,6 +165,8 @@ import {
   computeBlastRadius,
   normalizeGraphSnapshot
 } from "./eosCodeGraphAdapter.js";
+import { parseProjectDependencies, resolveProjectRoot } from "./eosDependencyParser.js";
+import { EOS_VERSION } from "./version.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = projectRoot;
@@ -141,7 +179,26 @@ const port = Number(process.env.PORT ?? 4173);
 const host = process.env.EOS_HOST ?? "127.0.0.1";
 const mockDraftsAllowed = process.env.EOS_ALLOW_MOCK_DRAFTS === "1";
 const deploymentMode = process.env.EOS_DEPLOYMENT_MODE ?? "local";
+const isLocalDeployment = deploymentMode === "local";
+const auth = new AuthService({
+  devOtpEnabled: isLocalDeployment && process.env.EOS_AUTH_DEV_OTP === "1"
+});
+const workspaceRegistry = new WorkspaceRegistry();
+const hostDiscoveryStore = new HostDiscoveryStore();
+const hostConnectionCoordinator = new HostConnectionCoordinator({
+  auditDir: path.join(path.dirname(vault.rootDir), "connection-receipts")
+});
+const hostHookCoordinator = new HostHookCoordinator({
+  auditDir: path.join(path.dirname(vault.rootDir), "host-hook-receipts"),
+  ...(process.env.EOS_SECRET_DIR ? { secretRoot: process.env.EOS_SECRET_DIR } : {})
+});
 const betaFeedbackAttempts = new Map();
+const PLATFORM_HEALTH_CACHE_MS = 30_000;
+let platformHealthCache = null;
+let platformHealthPromise = null;
+const WORKSPACE_EVIDENCE_CACHE_MS = 5_000;
+let workspaceEvidenceCache = null;
+let workspaceEvidencePromise = null;
 
 // Periodic cleanup of expired rate-limit entries to prevent memory leaks
 setInterval(() => {
@@ -168,6 +225,157 @@ function llmRuntimeStatus() {
     budgetRemaining: llm.budgetRemaining,
     maxTotalTokens: llm.maxTotalTokens
   };
+}
+
+async function cachedPlatformHealth(observedHosts = []) {
+  const observedKey = [...new Set(observedHosts)].sort().join(",");
+  const now = Date.now();
+  if (
+    platformHealthCache
+    && platformHealthCache.observedKey === observedKey
+    && now - platformHealthCache.updatedAt < PLATFORM_HEALTH_CACHE_MS
+  ) {
+    return structuredClone(platformHealthCache.value);
+  }
+  if (platformHealthPromise) {
+    if (platformHealthPromise.observedKey === observedKey) {
+      return structuredClone(await platformHealthPromise.promise);
+    }
+    try { await platformHealthPromise.promise; } catch { /* retry below with the requested scope */ }
+    return cachedPlatformHealth(observedHosts);
+  }
+  const promise = checkPlatformHealth({ vaultDir: vault.rootDir, observedHosts })
+    .then((value) => {
+      platformHealthCache = { observedKey, updatedAt: Date.now(), value };
+      return value;
+    })
+    .finally(() => {
+      if (platformHealthPromise?.promise === promise) platformHealthPromise = null;
+    });
+  platformHealthPromise = { observedKey, promise };
+  return structuredClone(await promise);
+}
+
+async function collectWorkspaceEvidence() {
+  if (workspaceEvidenceCache && Date.now() - workspaceEvidenceCache.updatedAt < WORKSPACE_EVIDENCE_CACHE_MS) {
+    return structuredClone(workspaceEvidenceCache.value);
+  }
+  if (workspaceEvidencePromise) return structuredClone(await workspaceEvidencePromise);
+
+  workspaceEvidencePromise = (async () => {
+    const workspaces = await workspaceRegistry.list();
+    const observations = [];
+    const consents = [];
+    const seenVaults = new Set([path.resolve(vault.rootDir)]);
+    for (const workspace of workspaces) {
+      if (workspace.status !== "ready" || !workspace.vaultDir) continue;
+      const vaultDir = path.resolve(workspace.vaultDir);
+      if (seenVaults.has(vaultDir)) continue;
+      seenVaults.add(vaultDir);
+      try {
+        const workspaceVault = new GitVault(vaultDir);
+        const [workspaceObservations, workspaceConsents] = await Promise.all([
+          workspaceVault.list("HostObservation"),
+          workspaceVault.list("HostObservationConsent")
+        ]);
+        observations.push(...workspaceObservations);
+        consents.push(...workspaceConsents.map((item) => ({ ...item, vaultDir })));
+      } catch (error) {
+        console.error(`[webServer] skipped workspace evidence ${workspace.name}:`, error.message);
+      }
+    }
+    const value = { workspaces, observations, consents };
+    workspaceEvidenceCache = { updatedAt: Date.now(), value };
+    return value;
+  })().finally(() => {
+    workspaceEvidencePromise = null;
+  });
+  return structuredClone(await workspaceEvidencePromise);
+}
+
+// 观察器/AgentBar 读取器的凭证候选来源：主 vault + 已注册工作区聚合。
+// collectWorkspaceEvidence 会跳过主 vault（去重），而 host consent 通常就批在主 vault，
+// 缺少这一合并会让采集器静默拿不到凭证（resolve 返回 null，不发观察不留日志）。
+async function listCollectorConsents() {
+  const own = (await vault.list("HostObservationConsent"))
+    .map((item) => ({ ...item, vaultDir: vault.rootDir }));
+  const aggregated = (await collectWorkspaceEvidence()).consents;
+  const seen = new Set(own.map((item) => item.id));
+  return [...own, ...aggregated.filter((item) => !seen.has(item.id))];
+}
+
+function dedupeRecords(records) {
+  const seen = new Set();
+  return records.filter((record) => {
+    const key = `${record.kind || "record"}:${record.id}`;
+    if (!record.id || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function clearWorkspaceEvidenceCache() {
+  workspaceEvidenceCache = null;
+}
+
+async function resolveVaultScopeForProject(projectId) {
+  if (typeof projectId !== "string" || !projectId.trim()) throw new Error("projectId is required");
+  const localProject = await vault.load("Project", projectId);
+  if (localProject) {
+    return { vault, projectId, vaultDir: vault.rootDir, workspaceDir: currentWorkspaceDir(), workspace: null };
+  }
+
+  const workspaces = await workspaceRegistry.list();
+  const workspace = workspaces.find((item) => item.status === "ready" && item.projectId === projectId);
+  if (!workspace?.vaultDir) throw new Error("project is not registered with EOS");
+  const scopedVault = new GitVault(workspace.vaultDir);
+  await scopedVault.init();
+  if (!(await scopedVault.load("Project", projectId))) throw new Error("registered project record is missing");
+  return {
+    vault: scopedVault,
+    projectId,
+    vaultDir: workspace.vaultDir,
+    workspaceDir: workspace.workspace,
+    workspace
+  };
+}
+
+async function resolveVaultScopeForConsent(consentId) {
+  if (typeof consentId !== "string" || !consentId.trim()) throw new Error("consentId is required");
+  const localConsent = await vault.load("HostObservationConsent", consentId);
+  if (localConsent) {
+    return {
+      vault,
+      consent: localConsent,
+      projectId: localConsent.projectId,
+      vaultDir: vault.rootDir,
+      workspaceDir: currentWorkspaceDir(),
+      workspace: null
+    };
+  }
+
+  const workspaces = await workspaceRegistry.list();
+  const seenVaults = new Set([path.resolve(vault.rootDir)]);
+  for (const workspace of workspaces) {
+    if (workspace.status !== "ready" || !workspace.vaultDir) continue;
+    const vaultDir = path.resolve(workspace.vaultDir);
+    if (seenVaults.has(vaultDir)) continue;
+    seenVaults.add(vaultDir);
+    const scopedVault = new GitVault(vaultDir);
+    await scopedVault.init();
+    const consent = await scopedVault.load("HostObservationConsent", consentId);
+    if (consent) {
+      return {
+        vault: scopedVault,
+        consent,
+        projectId: consent.projectId,
+        vaultDir,
+        workspaceDir: workspace.workspace,
+        workspace
+      };
+    }
+  }
+  throw new Error("host observation consent not found in registered workspaces");
 }
 
 const contentTypes = {
@@ -242,6 +450,49 @@ createServer(async (request, response) => {
   console.log(`Experience OS Web UI (${deploymentMode}): http://${host}:${port}`);
 });
 
+// 统一原生会话日志观察器：宿主零安装（无 Hook、无 MCP 注册）的状态监控。
+// EOS_SESSION_LOG_WATCHER=0 可关闭。详见 src/eosSessionLogWatcher.js。
+const sessionLogWatcher = createSessionLogWatcher({
+  vaultDir: vault.rootDir,
+  agentbarStateDir: process.env.EOS_AGENTBAR_PUBLISH === "0" ? null : defaultAgentbarStateDir(),
+  listConsents: listCollectorConsents,
+  record: async (payload) => {
+    const consentScope = await resolveVaultScopeForConsent(payload.consentId);
+    const result = await recordHostObservation(consentScope.vault, payload);
+    clearWorkspaceEvidenceCache();
+    platformHealthCache = null;
+    return result;
+  }
+});
+if (process.env.EOS_SESSION_LOG_WATCHER !== "0") {
+  sessionLogWatcher.start().catch((error) => {
+    console.error("[webServer] session log watcher failed to start:", error.message);
+  });
+}
+
+// AgentBar 协议读取器：~/.agentbar/state.d → host-observation 管线。
+// 有 Hook 宿主装上 AgentBar hooks（MIT）即零适配进入 EOS；trae 由 session-log
+// watcher 直接上报并发布协议文件，读取器跳过避免双通道重复。EOS_AGENTBAR_READER=0 可关闭。
+const agentbarReader = createAgentbarReader({
+  vaultDir: vault.rootDir,
+  skipHosts: process.env.EOS_SESSION_LOG_WATCHER === "0" || process.env.EOS_AGENTBAR_PUBLISH === "0"
+    ? []
+    : sessionLogWatcher.agentbarPublishHosts,
+  listConsents: listCollectorConsents,
+  record: async (payload) => {
+    const consentScope = await resolveVaultScopeForConsent(payload.consentId);
+    const result = await recordHostObservation(consentScope.vault, payload);
+    clearWorkspaceEvidenceCache();
+    platformHealthCache = null;
+    return result;
+  }
+});
+if (process.env.EOS_AGENTBAR_READER !== "0") {
+  agentbarReader.start().catch((error) => {
+    console.error("[webServer] agentbar reader failed to start:", error.message);
+  });
+}
+
 /**
  * Clamp a limit query parameter to a safe range.
  * Prevents abuse via ?limit=999999999.
@@ -268,24 +519,333 @@ function safeErrorMessage(error) {
   return "Internal server error";
 }
 
+const AUTH_COOKIE = "eos_session";
+const AUTH_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
+
+function cookieValue(request, name) {
+  const raw = String(request.headers.cookie || "");
+  for (const pair of raw.split(";")) {
+    const separator = pair.indexOf("=");
+    if (separator < 0) continue;
+    if (pair.slice(0, separator).trim() === name) {
+      try {
+        return decodeURIComponent(pair.slice(separator + 1).trim());
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function authCookie(token) {
+  return `${AUTH_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${AUTH_MAX_AGE_SECONDS}`;
+}
+
+function clearAuthCookie() {
+  return `${AUTH_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`;
+}
+
+function currentWorkspaceDir() {
+  return path.basename(path.dirname(vault.rootDir)) === ".eos"
+    ? path.dirname(path.dirname(vault.rootDir))
+    : rootDir;
+}
+
+async function currentWorkspaceProjectId() {
+  try {
+    const manifest = JSON.parse(await readFile(path.join(currentWorkspaceDir(), ".eos", "project.json"), "utf8"));
+    return typeof manifest.projectId === "string" && manifest.projectId.trim() ? manifest.projectId : null;
+  } catch {
+    return null;
+  }
+}
+
+function requireLocalOwner(request, response) {
+  const userContext = contextFromRequest(request);
+  if (hasPrivilegedAccess(userContext, { localMode: isLocalDeployment })) return true;
+  sendJson(response, {
+    error: userContext
+      ? "Admin access required for local machine discovery"
+      : "Authentication required for local machine discovery"
+  }, userContext ? 403 : 401);
+  return false;
+}
+
 async function handleApi(request, url, response) {
   if (url.pathname === "/api/health") {
     sendJson(response, {
       ok: true,
       service: "experience-os",
+      version: EOS_VERSION,
       mode: deploymentMode,
+      identityProtocol: "x-eos-identity",
+      localPrivilegedActions: isLocalDeployment,
       generatedAt: new Date().toISOString()
     });
     return;
   }
 
+  if (url.pathname === "/api/auth/status" && request.method === "GET") {
+    sendJson(response, auth.status(cookieValue(request, AUTH_COOKIE)));
+    return;
+  }
+
+  if (url.pathname === "/api/auth/request-code" && request.method === "POST") {
+    try {
+      sendJson(response, await auth.requestCode(await readJsonBody(request)));
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/auth/verify-code" && request.method === "POST") {
+    try {
+      const result = auth.verifyCode(await readJsonBody(request));
+      response.setHeader("set-cookie", authCookie(result.token));
+      sendJson(response, { ok: true, session: result.session });
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/auth/logout" && request.method === "POST") {
+    auth.logout(cookieValue(request, AUTH_COOKIE));
+    response.setHeader("set-cookie", clearAuthCookie());
+    sendJson(response, { ok: true });
+    return;
+  }
+
+  if (url.pathname === "/api/workspaces" && request.method === "GET") {
+    if (!requireLocalOwner(request, response)) return;
+    try {
+      const workspaces = await workspaceRegistry.list();
+      sendJson(response, {
+        workspaces,
+        count: workspaces.length,
+        currentWorkspace: currentWorkspaceDir()
+      });
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/discovery" && request.method === "GET") {
+    if (!requireLocalOwner(request, response)) return;
+    try {
+      sendJson(response, await hostDiscoveryStore.summary());
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/discovery/scan" && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    try {
+      const body = await readJsonBody(request);
+      if (body.consent !== true) throw new Error("重新扫描需要用户明确授权");
+      const health = await checkPlatformHealth({ vaultDir: vault.rootDir, observedSourceTools: [] });
+      const discovery = await discoverHostProjects({
+        consent: true,
+        hosts: body.hosts,
+        currentWorkspace: currentWorkspaceDir()
+      });
+      const hostResults = Object.fromEntries(discovery.selectedHosts.map((name) => {
+        const result = health.platforms[name];
+        return [name, {
+          installed: Boolean(result?.proof?.hostInstalled),
+          status: result?.status || "unknown",
+          compatibilityLevel: result?.compatibilityLevel ?? 0,
+          version: result?.details?.version || null
+        }];
+      }));
+      const run = await hostDiscoveryStore.recordScan({
+        consent: true,
+        selectedHosts: discovery.selectedHosts,
+        hostResults,
+        discovery
+      });
+      sendJson(response, {
+        run,
+        projects: discovery.projects,
+        metadataDiagnostics: discovery.metadataDiagnostics
+      }, 201);
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/discovery/revoke" && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    try {
+      const body = await readJsonBody(request);
+      sendJson(response, { grant: await hostDiscoveryStore.revoke({ confirm: body.confirm }) });
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/onboarding/scan-hosts" && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    try {
+      const body = await readJsonBody(request);
+      if (body.consent !== true) throw new Error("宿主检测需要用户明确授权");
+      const health = await checkPlatformHealth({ vaultDir: vault.rootDir, observedSourceTools: [] });
+      const hosts = PLATFORMS.map((definition) => {
+        const result = health.platforms[definition.name];
+        return {
+          name: definition.name,
+          label: definition.label,
+          description: definition.description,
+          installed: Boolean(result?.proof?.hostInstalled),
+          version: result?.details?.version || null,
+          compatibilityLevel: result?.compatibilityLevel ?? 0,
+          status: result?.status || "unknown"
+        };
+      });
+      sendJson(response, {
+        consented: true,
+        scanScope: ["宿主是否安装", "宿主版本", "EOS 连接证据"],
+        excludedScope: ["聊天正文", "源码内容", "项目文件内容"],
+        hosts
+      });
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/onboarding/discover-projects" && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    try {
+      const body = await readJsonBody(request);
+      sendJson(response, await discoverHostProjects({
+        consent: body.consent,
+        hosts: body.hosts,
+        currentWorkspace: currentWorkspaceDir()
+      }));
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/onboarding/inspect-manual" && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    try {
+      const body = await readJsonBody(request);
+      if (body.consent !== true) throw new Error("手动添加项目需要用户明确授权");
+      sendJson(response, await inspectManualProject(body.path));
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/workspaces/connect" && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    try {
+      const body = await readJsonBody(request);
+      if (!Array.isArray(body.projects) || body.projects.length === 0) {
+        throw new Error("请选择至少一个项目");
+      }
+      if (body.projects.length > 30) throw new Error("每次最多接入 30 个项目");
+      const connected = [];
+      const failed = [];
+      // Intentionally sequential: bootstrap and registry writes must never race.
+      for (const candidate of body.projects) {
+        try {
+          connected.push(await workspaceRegistry.connect({
+            workspaceDir: candidate?.path,
+            sourceHosts: (candidate?.sourceHosts || []).filter((host) =>
+              ["codex", "claude", "cursor", "trae", "vscode"].includes(host)
+            ),
+            consent: body.consent,
+            confirmWrites: body.confirmWrites
+          }));
+        } catch (error) {
+          failed.push({ path: candidate?.path || null, error: error.message });
+        }
+      }
+      sendJson(response, { ok: failed.length === 0, connected, failed }, failed.length ? 207 : 201);
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/workspaces/disconnect" && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    try {
+      const body = await readJsonBody(request);
+      sendJson(response, await workspaceRegistry.disconnect({
+        workspaceDir: body.path,
+        confirm: body.confirm
+      }));
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
   if (url.pathname === "/api/platforms" && request.method === "GET") {
     try {
-      const health = await checkPlatformHealth();
+      const [localObservations, localConsents, projectId, workspaceEvidence] = await Promise.all([
+        vault.list("HostObservation"),
+        vault.list("HostObservationConsent"),
+        currentWorkspaceProjectId(),
+        collectWorkspaceEvidence()
+      ]);
+      const hostObservations = dedupeRecords([...localObservations, ...workspaceEvidence.observations]);
+      const observationConsents = dedupeRecords([...localConsents, ...workspaceEvidence.consents]);
+      const observedHosts = [...new Set(hostObservations.map((event) => event.host).filter(Boolean))];
+      const baseHealth = await cachedPlatformHealth(observedHosts);
+      const health = promoteRegisteredWorkspaceBindings(baseHealth, {
+        workspaces: workspaceEvidence.workspaces,
+        observedHosts,
+        observations: hostObservations
+      });
+      health.scope = {
+        mode: "registered_workspaces",
+        vaultDir: vault.rootDir,
+        projectId,
+        workspaceCount: workspaceEvidence.workspaces.filter((item) => item.status === "ready").length
+      };
       for (const name of Object.keys(health.platforms)) {
         try {
           health.platforms[name].instructions = getInstallInstructions(name);
         } catch { /* unknown platform — skip instructions */ }
+        if (["codex", "claude", "cursor"].includes(name)) {
+          const boundWorkspace = health.platforms[name].details.boundWorkspace;
+          const scopedProjectId = boundWorkspace?.projectId || projectId;
+          const scopedWorkspaceDir = boundWorkspace?.workspace || currentWorkspaceDir();
+          if (boundWorkspace) {
+            health.platforms[name].connection = buildPlatformConnectionPlan(
+              name,
+              boundWorkspace.workspace,
+              boundWorkspace.vaultDir
+            );
+          }
+          const activeConsent = observationConsents.find((item) =>
+            item.projectId === scopedProjectId && item.host === name && item.status === "active"
+          );
+          health.platforms[name].details.hookInstallation = await inspectHostHookInstallation({
+            host: name,
+            workspaceDir: scopedWorkspaceDir,
+            configPath: hostHookConfigPath(name, scopedWorkspaceDir),
+            secretRoot: hostHookCoordinator.secretRoot,
+            tokenPath: hostObservationTokenPath(name, scopedWorkspaceDir, hostHookCoordinator.secretRoot),
+            expectedConsentId: activeConsent?.id || null,
+            expectedCaptureTokenHash: activeConsent?.captureTokenHash || null
+          });
+          health.platforms[name].details.observationConsentActive = Boolean(activeConsent);
+        }
       }
       sendJson(response, health);
     } catch (error) {
@@ -297,19 +857,66 @@ async function handleApi(request, url, response) {
   }
 
   if (url.pathname.startsWith("/api/platforms/") && url.pathname.endsWith("/start") && request.method === "POST") {
-    // Require authentication — starting platforms can spawn processes.
+    // Connection plans expose machine-local paths, so they remain trusted on
+    // loopback and admin-only elsewhere.
     const userContext = contextFromRequest(request);
-    if (!userContext) {
-      sendJson(response, { started: false, message: "Authentication required to start platform components." }, 401);
+    if (!hasPrivilegedAccess(userContext, { localMode: isLocalDeployment })) {
+      sendJson(response, {
+        started: false,
+        message: userContext
+          ? "Admin access required to start platform components."
+          : "Authentication required to start platform components."
+      }, userContext ? 403 : 401);
       return;
     }
     const name = url.pathname.slice("/api/platforms/".length, -"/start".length);
     try {
       const body = await readJsonBody(request).catch(() => ({}));
-      const result = await tryStartPlatform(name, body || {});
+      const result = await tryStartPlatform(name, {
+        ...(body || {}),
+        vaultDir: vault.rootDir
+      });
       sendJson(response, result);
     } catch (error) {
       sendJson(response, { started: false, message: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/platforms/") && url.pathname.endsWith("/connection-plan") && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    const name = url.pathname.slice("/api/platforms/".length, -"/connection-plan".length);
+    try {
+      const body = await readJsonBody(request).catch(() => ({}));
+      const projectScope = body.projectId
+        ? await resolveVaultScopeForProject(body.projectId)
+        : { workspaceDir: currentWorkspaceDir(), vaultDir: vault.rootDir };
+      sendJson(response, await hostConnectionCoordinator.preview(name, {
+        workspaceDir: projectScope.workspaceDir,
+        vaultDir: projectScope.vaultDir
+      }));
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/platforms/") && url.pathname.endsWith("/connection-apply") && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    const name = url.pathname.slice("/api/platforms/".length, -"/connection-apply".length);
+    try {
+      const body = await readJsonBody(request);
+      if (body.approved !== true) {
+        sendJson(response, { error: "Explicit human approval is required" }, 400);
+        return;
+      }
+      const receipt = await hostConnectionCoordinator.apply(body.planId, {
+        approved: true,
+        target: name
+      });
+      sendJson(response, receipt);
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
     }
     return;
   }
@@ -318,11 +925,198 @@ async function handleApi(request, url, response) {
     const name = url.pathname.slice("/api/platforms/".length, -"/diagnose".length);
     try {
       const { diagnosePlatform } = await import("./eosPlatformAdapter.js");
-      const diagnosis = await diagnosePlatform(name);
+      const hostObservations = await vault.list("HostObservation");
+      const observedHosts = [...new Set(hostObservations.map((event) => event.host).filter(Boolean))];
+      const diagnosis = await diagnosePlatform(name, {
+        vaultDir: vault.rootDir,
+        observedHosts
+      });
       sendJson(response, diagnosis);
     } catch (error) {
       sendJson(response, { status: "error", healthy: false, advice: [error.message], result: null }, 400);
     }
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/platforms/") && url.pathname.endsWith("/hook-plan") && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    const name = url.pathname.slice("/api/platforms/".length, -"/hook-plan".length);
+    try {
+      const body = await readJsonBody(request).catch(() => ({}));
+      if (["codex", "claude", "cursor"].includes(name)) {
+        const consentScope = await resolveVaultScopeForConsent(body.consentId);
+        const consent = consentScope.consent;
+        if (!consent || consent.status !== "active" || consent.scope !== "metadata_only" || consent.host !== name) {
+          sendJson(response, { error: "Active metadata-only consent for this host is required" }, 400);
+          return;
+        }
+        if (!verifyHostObservationCaptureToken(consent, body.captureToken)) {
+          sendJson(response, { error: "Valid Host observation capture credential is required" }, 400);
+          return;
+        }
+        body.workspaceDir = consentScope.workspaceDir;
+      }
+      sendJson(response, await hostHookCoordinator.previewInstall({
+        host: name,
+        workspaceDir: body.workspaceDir || currentWorkspaceDir(),
+        consentId: body.consentId,
+        captureToken: body.captureToken,
+        endpoint: body.endpoint || `http://127.0.0.1:${port}`
+      }));
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/platforms/") && url.pathname.endsWith("/hook-apply") && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    const name = url.pathname.slice("/api/platforms/".length, -"/hook-apply".length);
+    try {
+      const body = await readJsonBody(request);
+      const pending = hostHookCoordinator.getPendingPlan(body.planId);
+      if (!pending || pending.operation !== "install" || pending.host !== name) throw new Error("Install Hook plan is missing or does not match host");
+      const consentScope = await resolveVaultScopeForConsent(pending.consentId);
+      const consent = consentScope.consent;
+      if (path.resolve(pending.workspaceDir) !== path.resolve(consentScope.workspaceDir)) {
+        throw new Error("Hook plan workspace no longer matches the consent workspace");
+      }
+      if (!consent || consent.status !== "active" || consent.scope !== "metadata_only" || consent.host !== name) {
+        throw new Error("Active metadata-only consent for this Hook plan is required");
+      }
+      if (!verifyHostObservationCaptureToken(consent, pending.captureToken)) {
+        throw new Error("Host observation capture credential changed after preview; build a new plan");
+      }
+      sendJson(response, await hostHookCoordinator.apply(body.planId, {
+        host: name,
+        operation: "install",
+        approved: body.approved,
+        confirmedScope: body.confirmedScope
+      }));
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/platforms/") && url.pathname.endsWith("/hook-remove-plan") && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    const name = url.pathname.slice("/api/platforms/".length, -"/hook-remove-plan".length);
+    try {
+      const body = await readJsonBody(request).catch(() => ({}));
+      const projectScope = await resolveVaultScopeForProject(body.projectId);
+      sendJson(response, await hostHookCoordinator.previewRemoval({
+        host: name,
+        workspaceDir: projectScope.workspaceDir
+      }));
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname.startsWith("/api/platforms/") && url.pathname.endsWith("/hook-remove-apply") && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    const name = url.pathname.slice("/api/platforms/".length, -"/hook-remove-apply".length);
+    let consentRevoked = false;
+    try {
+      const body = await readJsonBody(request);
+      const pending = hostHookCoordinator.getPendingPlan(body.planId);
+      if (!pending || pending.operation !== "remove" || pending.host !== name) throw new Error("Remove Hook plan is missing or does not match host");
+      if (body.approved !== true || body.confirmedScope !== "metadata_only_operational_status") {
+        throw new Error("Explicit second confirmation is required to remove EOS Hooks");
+      }
+      const projectScope = await resolveVaultScopeForProject(body.projectId);
+      const consent = (await projectScope.vault.list("HostObservationConsent"))
+        .filter((item) => item.projectId === projectScope.projectId && item.host === name && item.status === "active")
+        .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0] || null;
+      if (consent) {
+        await revokeHostObservationConsent(projectScope.vault, {
+          consentId: consent.id,
+          projectId: consent.projectId,
+          revokedBy: "local_owner"
+        });
+        consentRevoked = true;
+        clearWorkspaceEvidenceCache();
+      }
+      const receipt = await hostHookCoordinator.apply(body.planId, {
+        host: name,
+        operation: "remove",
+        approved: true,
+        confirmedScope: body.confirmedScope
+      });
+      sendJson(response, { ...receipt, consentRevoked });
+    } catch (error) {
+      sendJson(response, { error: error.message, consentRevoked }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/host-observation-consents" && request.method === "GET") {
+    const projectId = url.searchParams.get("projectId");
+    if (!projectId) { sendJson(response, { error: "projectId is required" }, 400); return; }
+    const projectScope = await resolveVaultScopeForProject(projectId);
+    const records = (await projectScope.vault.list("HostObservationConsent"))
+      .filter((item) => item.projectId === projectId)
+      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    sendJson(response, { count: records.length, records });
+    return;
+  }
+
+  if (url.pathname === "/api/host-observation-consents" && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    try {
+      const body = await readJsonBody(request);
+      const projectScope = await resolveVaultScopeForProject(body.projectId);
+      const result = await approveHostObservationConsent(projectScope.vault, body);
+      clearWorkspaceEvidenceCache();
+      sendJson(response, result, 201);
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/host-observation-consents/revoke" && request.method === "POST") {
+    if (!requireLocalOwner(request, response)) return;
+    try {
+      const body = await readJsonBody(request);
+      const consentScope = await resolveVaultScopeForConsent(body.consentId);
+      const result = await revokeHostObservationConsent(consentScope.vault, body);
+      clearWorkspaceEvidenceCache();
+      sendJson(response, result);
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/host-observations" && request.method === "POST") {
+    try {
+      const body = await readJsonBody(request);
+      console.log("[OBS-DEBUG]", JSON.stringify({ host: body?.observation?.host, event: body?.observation?.eventName, tool: body?.observation?.toolName, sessionHash: body?.observation?.sessionHash?.slice(0, 16), consentId: body?.consentId, socket: `${request.socket?.remoteAddress}:${request.socket?.remotePort}` }));
+      const consentScope = await resolveVaultScopeForConsent(body.consentId);
+      const result = await recordHostObservation(consentScope.vault, body);
+      clearWorkspaceEvidenceCache();
+      platformHealthCache = null;
+      sendJson(response, result, 201);
+    } catch (error) {
+      sendJson(response, { error: error.message }, 400);
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/host-observations" && request.method === "GET") {
+    const projectId = url.searchParams.get("projectId");
+    if (!projectId) { sendJson(response, { error: "projectId is required" }, 400); return; }
+    const projectScope = await resolveVaultScopeForProject(projectId);
+    sendJson(response, {
+      records: await listHostObservations(projectScope.vault, {
+        projectId,
+        host: url.searchParams.get("host"),
+        limit: clampLimit(url.searchParams.get("limit"), 100)
+      })
+    });
     return;
   }
 
@@ -343,7 +1137,13 @@ async function handleApi(request, url, response) {
     betaFeedbackAttempts.set(address, attempts);
     try {
       const feedback = await submitBetaFeedback(vault, await readJsonBody(request));
-      sendJson(response, { ok: true, id: feedback.id }, 201);
+      sendJson(response, {
+        ok: true,
+        id: feedback.id,
+        participantId: feedback.participantId,
+        storageScope: isLocalDeployment ? "local" : "service",
+        canExport: isLocalDeployment
+      }, 201);
     } catch (error) {
       // Submission failed — release the reserved slot so the user can retry
       attempts.pop();
@@ -357,17 +1157,22 @@ async function handleApi(request, url, response) {
   if (url.pathname === "/api/beta-feedback" && request.method === "GET") {
     const records = latest(await vault.list("BetaFeedback"), 100);
     const userContext = contextFromRequest(request);
-    // Default-deny: only authenticated admins can see contact PII.
-    const isAdmin = userContext && userContext.role === "admin";
-    const safe = isAdmin ? records : records.map((r) => { const { contact, ...rest } = r; return rest; });
-    sendJson(response, { kind: "BetaFeedback", records: safe });
+    const canExport = hasPrivilegedAccess(userContext, { localMode: isLocalDeployment });
+    // Remote participants may submit but cannot enumerate other testers' reports.
+    const safe = canExport ? records : [];
+    sendJson(response, {
+      kind: "BetaFeedback",
+      records: safe,
+      canExport,
+      storageScope: isLocalDeployment ? "local" : "service"
+    });
     return;
   }
 
   if (url.pathname === "/api/beta-feedback/export" && request.method === "GET") {
     const userContext = contextFromRequest(request);
-    // Default-deny: require authenticated admin for export (which includes PII).
-    if (!userContext || userContext.role !== "admin") {
+    // A local tester owns this Vault. Remote/private-beta exports remain admin-only.
+    if (!hasPrivilegedAccess(userContext, { localMode: isLocalDeployment })) {
       sendJson(response, { error: "Admin access required for export" }, 403);
       return;
     }
@@ -387,6 +1192,10 @@ async function handleApi(request, url, response) {
         createdAt: r.createdAt
       }))
     };
+    response.setHeader(
+      "content-disposition",
+      `attachment; filename="eos-beta-feedback-${new Date().toISOString().slice(0, 10)}.json"`
+    );
     sendJson(response, exported);
     return;
   }
@@ -410,7 +1219,7 @@ async function handleApi(request, url, response) {
     return;
   }
 
-  if (request.method === "POST" && (url.pathname === "/api/reuse-feedback" || url.pathname === "/api/experience-reuse-trials" || url.pathname === "/api/experience-reuse-trials/complete" || url.pathname === "/api/skill-registry/import" || url.pathname === "/api/mcp/export" || url.pathname === "/api/mcp/export-all" || url.pathname.startsWith("/api/team-review/") || url.pathname.startsWith("/api/marketplace/") || url.pathname.startsWith("/api/quality/") || url.pathname.startsWith("/api/pricing/") || url.pathname.startsWith("/api/transaction/") || url.pathname === "/api/projects" || url.pathname === "/api/project" || url.pathname === "/api/evidence" || url.pathname === "/api/experience-receipts" || url.pathname === "/api/experience-receipt-drafts" || url.pathname === "/api/experience-receipt-drafts/accept" || url.pathname === "/api/experience-receipt-drafts/reject" || url.pathname === "/api/experience-receipt-drafts/defer" || url.pathname === "/api/experience-receipt-drafts/resume" || url.pathname === "/api/decisions" || url.pathname === "/api/outcomes" || url.pathname === "/api/relay/events" || url.pathname === "/api/work-checkpoints" || url.pathname === "/api/experience-assets" || url.pathname === "/api/capture-permits/approve" || url.pathname === "/api/capture-permits/reject" || url.pathname === "/api/code-graph/ingest" || url.pathname === "/api/code-graph/blast-radius" || url.pathname === "/api/beta-feedback")) {
+  if (request.method === "POST" && (url.pathname === "/api/reuse-feedback" || url.pathname === "/api/experience-reuse-trials" || url.pathname === "/api/experience-reuse-trials/complete" || url.pathname === "/api/skill-registry/import" || url.pathname === "/api/mcp/export" || url.pathname === "/api/mcp/export-all" || url.pathname.startsWith("/api/team-review/") || url.pathname.startsWith("/api/marketplace/") || url.pathname.startsWith("/api/quality/") || url.pathname.startsWith("/api/pricing/") || url.pathname.startsWith("/api/transaction/") || url.pathname === "/api/projects" || url.pathname === "/api/project" || url.pathname === "/api/evidence" || url.pathname === "/api/experience-receipts" || url.pathname === "/api/experience-receipt-drafts" || url.pathname === "/api/experience-receipt-drafts/accept" || url.pathname === "/api/experience-receipt-drafts/reject" || url.pathname === "/api/experience-receipt-drafts/defer" || url.pathname === "/api/experience-receipt-drafts/resume" || url.pathname === "/api/decisions" || url.pathname === "/api/outcomes" || url.pathname === "/api/relay/events" || url.pathname === "/api/work-checkpoints" || url.pathname === "/api/experience-assets" || url.pathname === "/api/capture-permits/approve" || url.pathname === "/api/capture-permits/reject" || url.pathname === "/api/code-graph/ingest" || url.pathname === "/api/code-graph/blast-radius" || url.pathname === "/api/code-graph/parse-project" || url.pathname === "/api/beta-feedback")) {
     // Handle below in the specific route handlers
   } else if (request.method !== "GET") {
     sendJson(response, { error: "Method not allowed" }, 405);
@@ -476,18 +1285,49 @@ async function handleApi(request, url, response) {
   }
 
   if (url.pathname === "/api/attention") {
-    const [drafts, reviewPackets, wallHits] = await Promise.all([
+    const [drafts, reviewPackets, wallHits, localObservations, projectId, workspaceEvidence] = await Promise.all([
       vault.list("ExperienceReceiptDraft"),
       vault.list("ReviewPacket"),
-      vault.list("WallHit")
+      vault.list("WallHit"),
+      vault.list("HostObservation"),
+      currentWorkspaceProjectId(),
+      collectWorkspaceEvidence()
     ]);
+    const hostObservations = dedupeRecords([...localObservations, ...workspaceEvidence.observations]);
+    const observedHosts = [...new Set(hostObservations.map((event) => event.host).filter(Boolean))];
+    const baseHealth = await cachedPlatformHealth(observedHosts);
+    const health = promoteRegisteredWorkspaceBindings(baseHealth, {
+      workspaces: workspaceEvidence.workspaces,
+      observedHosts,
+      observations: hostObservations
+    });
+    const scopedHostObservations = hostObservations.filter((observation) => {
+      const boundProjectId = health.platforms?.[observation.host]?.details?.boundWorkspace?.projectId;
+      const consentedProject = workspaceEvidence.consents.some((consent) =>
+        consent.host === observation.host
+        && consent.projectId === observation.projectId
+        && consent.status === "active");
+      return !boundProjectId || observation.projectId === boundProjectId || consentedProject;
+    });
+    const agentStatus = buildAgentStatus({
+      platforms: health.platforms,
+      observations: scopedHostObservations
+    });
     let permits = [];
     try {
       permits = await listCapturePermitRequests(requireWorkspaceEosDir());
     } catch (error) {
       if (!String(error.message).includes("bootstrapped workspace Vault")) throw error;
     }
-    sendJson(response, buildAttentionSnapshot({ permits, drafts, reviewPackets, wallHits, llm: llmRuntimeStatus() }));
+    sendJson(response, buildAttentionSnapshot({
+      permits,
+      drafts,
+      reviewPackets,
+      wallHits,
+      agents: agentStatus.agents,
+      agentSummary: agentStatus.summary,
+      llm: llmRuntimeStatus()
+    }));
     return;
   }
 
@@ -889,6 +1729,24 @@ async function handleApi(request, url, response) {
       await vault.save(skill);
     }
     sendJson(response, { ok: true, skill });
+    return;
+  }
+
+  if (url.pathname === "/api/skills/presets" && request.method === "GET") {
+    const presets = await listPresetSkills();
+    sendJson(response, { ok: true, presets, schemaVersion: PRESET_SCHEMA_VERSION });
+    return;
+  }
+
+  if (url.pathname === "/api/skills/presets/install" && request.method === "POST") {
+    const body = await readJsonBody(request);
+    const projectId = typeof activeProjectId === "string" ? activeProjectId : (typeof body === "object" && body && typeof body.projectId === "string" ? body.projectId : null);
+    if (!projectId) {
+      sendJson(response, { error: "projectId is required (no active project)" }, 400);
+      return;
+    }
+    const result = await installPresetSkills({ vault, projectId, skillNames: (typeof body === "object" && body && Array.isArray(body.skillNames)) ? body.skillNames : null });
+    sendJson(response, { ok: true, ...result });
     return;
   }
 
@@ -1462,6 +2320,37 @@ async function handleApi(request, url, response) {
       }
       const result = computeBlastRadius(normalizeGraphSnapshot(body.snapshot), body.targetId);
       sendJson(response, result);
+    } catch (error) {
+      sendJson(response, { error: safeErrorMessage(error) }, 400);
+    }
+    return;
+  }
+
+
+  if (url.pathname === "/api/code-graph/parse-project" && request.method === "POST") {
+    try {
+      const body = await readJsonBody(request);
+      if (!body.projectId || !body.rootDir) {
+        sendJson(response, { error: "projectId and rootDir are required" }, 400);
+        return;
+      }
+      const projectRootPath = resolveProjectRoot(String(body.rootDir), { baseDir: rootDir });
+      const snapshot = await parseProjectDependencies(projectRootPath, {
+        includeExternal: body.includeExternal !== false,
+        includeNodeBuiltins: body.includeNodeBuiltins === true
+      });
+      const result = await ingestCodeGraphSnapshot(vault, {
+        projectId: body.projectId,
+        snapshot,
+        sourceTool: "eos-dependency-parser",
+        sourceRef: projectRootPath
+      });
+      sendJson(response, {
+        ok: true,
+        snapshotId: result.snapshotId,
+        summary: result.summary,
+        patternCount: result.records.length
+      });
     } catch (error) {
       sendJson(response, { error: safeErrorMessage(error) }, 400);
     }

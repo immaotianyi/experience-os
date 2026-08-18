@@ -46,7 +46,7 @@ Vite 开发服务器支持热更新（HMR），修改 React 组件后浏览器�
 | `EOS_HOST` | `127.0.0.1` | 绑定地址 |
 | `EOS_VAULT_DIR` | `work/vaults/real` | Vault 根目录 |
 | `EOS_ALLOW_MOCK_DRAFTS` | 未设置 | 设为 `"1"` 允许 mock LLM 草稿（演示用） |
-| `EOS_DEPLOYMENT_MODE` | `"local"` | `"local"` 或 `"cloud"`（Docker/Render 部署） |
+| `EOS_DEPLOYMENT_MODE` | `"local"` | `"local"`、`"private_beta"` 或 `"cloud"` |
 
 ---
 
@@ -186,6 +186,7 @@ Vite 开发服务器支持热更新（HMR），修改 React 组件后浏览器�
 
 - [ ] **`npm test` 通过**：所有后端单元测试绿色，无失败用例。
 - [ ] **`npm run build` 前端通过**：在 `apps/web-react/` 下 `npm run build`（或根目录 `npm run web:build`）成功，Vite 构建无错误。
+- [ ] **`npm run release:check` 通过**：版本、文档和构建产物不存在漂移或旧哈希文件。
 - [ ] **手动验证 `/api/health`**：启动后端后，`curl http://127.0.0.1:4173/api/health` 返回正常响应。
 - [ ] **无 lint 警告**：检查是否有未使用的 import、变量（项目目前未接入 ESLint，但请自行 review）。
 - [ ] **文件头注释**：新增的 `.js`/`.jsx` 文件已添加文件头注释，遵循本指南的规范。
